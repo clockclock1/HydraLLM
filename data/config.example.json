@@ -1,0 +1,63 @@
+{
+  "adminToken": "admin",
+  "proxyKeys": [
+    {
+      "name": "test-key",
+      "key": "sk-local-test",
+      "enabled": true
+    }
+  ],
+  "failoverStatusCodes": [
+    401,
+    403,
+    408,
+    409,
+    429,
+    500,
+    502,
+    503,
+    504
+  ],
+  "requestTimeoutMs": 120000,
+  "modelSource": {
+    "enabled": false,
+    "url": "",
+    "apiKey": "",
+    "refreshSeconds": 300,
+    "include": "",
+    "exclude": "",
+    "publicPrefix": "",
+    "publicSuffix": "",
+    "targets": [
+      {
+        "name": "primary-openai",
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-replace-me",
+        "modelNameTemplate": "{model}",
+        "enabled": true
+      },
+      {
+        "name": "backup-openai",
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-replace-me-too",
+        "modelNameTemplate": "{model}",
+        "enabled": false
+      }
+    ]
+  },
+  "models": [
+    {
+      "publicName": "gpt-failover",
+      "enabled": true,
+      "targets": [
+        {
+          "name": "primary-openai",
+          "baseUrl": "https://api.openai.com/v1",
+          "apiKey": "sk-replace-me",
+          "modelName": "gpt-4.1-mini",
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+node_modules/
+logs/
+*.log
+ui/dist/
+dist/
+output/
+data/config.json
+model-failover-proxy-ui.zip
