@@ -51,7 +51,8 @@ const defaultConfig = {
   requestTimeoutMs: 120000,
   circuitBreaker: {
     failureThreshold: 3,
-    cooldownMinutes: 10
+    cooldownMinutes: 10,
+    immediateCooldownStatusCodes: [429]
   },
   modelSource: {
     enabled: false,
@@ -154,6 +155,9 @@ function normalizeCircuitBreaker(input) {
   const breaker = { ...defaultConfig.circuitBreaker, ...(input || {}) };
   breaker.failureThreshold = Math.max(1, Number(breaker.failureThreshold || defaultConfig.circuitBreaker.failureThreshold));
   breaker.cooldownMinutes = Math.max(1, Number(breaker.cooldownMinutes || defaultConfig.circuitBreaker.cooldownMinutes));
+  breaker.immediateCooldownStatusCodes = Array.isArray(breaker.immediateCooldownStatusCodes)
+    ? breaker.immediateCooldownStatusCodes.map(Number).filter((item) => Number.isFinite(item))
+    : defaultConfig.circuitBreaker.immediateCooldownStatusCodes;
   return breaker;
 }
 
@@ -268,10 +272,11 @@ function targetKey(model, target) {
   return `${model.publicName}/${target.name || ""}/${target.modelName || ""}/${target.baseUrl || ""}`;
 }
 
-function recordTarget(model, target, ok, cfg) {
+function recordTarget(model, target, ok, cfg, failure = {}) {
   const key = targetKey(model, target);
   const failureThreshold = cfg?.circuitBreaker?.failureThreshold || defaultConfig.circuitBreaker.failureThreshold;
   const cooldownMs = (cfg?.circuitBreaker?.cooldownMinutes || defaultConfig.circuitBreaker.cooldownMinutes) * 60 * 1000;
+  const immediateCooldownStatusCodes = cfg?.circuitBreaker?.immediateCooldownStatusCodes || defaultConfig.circuitBreaker.immediateCooldownStatusCodes;
   stats.targets[key] ||= {
     model: model.publicName,
     target: target.name || target.modelName || target.baseUrl,
@@ -280,22 +285,35 @@ function recordTarget(model, target, ok, cfg) {
     ok: 0,
     error: 0,
     consecutiveFailures: 0,
-    disabledUntil: 0
+    disabledUntil: 0,
+    lastStatus: 0,
+    lastError: ""
   };
   if (ok) {
     stats.targets[key].ok += 1;
     stats.targets[key].consecutiveFailures = 0;
+    stats.targets[key].lastStatus = 0;
+    stats.targets[key].lastError = "";
     circuitBreakers.delete(key);
   } else {
     stats.targets[key].error += 1;
     const breaker = circuitBreakers.get(key) || { failures: 0, disabledUntil: 0 };
     breaker.failures += 1;
-    if (breaker.failures >= failureThreshold) {
+    if (breaker.failures >= failureThreshold || immediateCooldownStatusCodes.includes(Number(failure.status))) {
       breaker.disabledUntil = Date.now() + cooldownMs;
     }
     circuitBreakers.set(key, breaker);
     stats.targets[key].consecutiveFailures = breaker.failures;
     stats.targets[key].disabledUntil = breaker.disabledUntil || 0;
+  }
+}
+
+function recordTargetFailure(model, target, cfg, failure) {
+  recordTarget(model, target, false, cfg, failure);
+  const key = targetKey(model, target);
+  if (stats.targets[key]) {
+    stats.targets[key].lastStatus = Number(failure?.status || 0);
+    stats.targets[key].lastError = failure?.message || failure?.body || "";
   }
 }
 
@@ -306,6 +324,73 @@ function upstreamUrl(target, pathname) {
 
 function shouldTryNext(statusCode, cfg) {
   return cfg.failoverStatusCodes.includes(Number(statusCode));
+}
+
+function classifyUpstreamFailure(statusCode, text, responseOk) {
+  const status = Number(statusCode || 0);
+  const body = String(text || "");
+  const parsed = parseJsonSafe(body);
+  const embedded = embeddedError(parsed, body);
+
+  if (!responseOk) {
+    return {
+      status,
+      retryable: true,
+      message: embedded.message || `Upstream returned ${status}`,
+      body: trimError(body)
+    };
+  }
+
+  if (embedded.message) {
+    return {
+      status: embedded.status || status || 500,
+      retryable: true,
+      message: embedded.message,
+      body: trimError(body)
+    };
+  }
+
+  return null;
+}
+
+function parseJsonSafe(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function embeddedError(payload, text) {
+  const hasExplicitError = payload && (
+    Object.prototype.hasOwnProperty.call(payload, "error") ||
+    Object.prototype.hasOwnProperty.call(payload, "error_message") ||
+    Object.prototype.hasOwnProperty.call(payload, "status_code")
+  );
+  const error = payload?.error || payload?.detail?.error || payload?.details?.error;
+  const message = [
+    typeof error === "string" ? error : "",
+    error?.message,
+    hasExplicitError ? payload?.message : "",
+    payload?.detail,
+    payload?.error_message,
+    payload?.error?.details
+  ].find((item) => typeof item === "string" && item.trim());
+
+  const rawStatus = error?.status || error?.status_code || error?.code || payload?.status || payload?.status_code;
+  const numericStatus = Number(rawStatus);
+  const regexStatus = String(text || "").match(/\b(?:returned|status|code|http)\s*:?\s*(\d{3})\b/i);
+  const status = Number.isFinite(numericStatus) && numericStatus >= 400 ? numericStatus : Number(regexStatus?.[1] || 0);
+
+  if (message || status >= 400) {
+    return {
+      status: status >= 400 ? status : 0,
+      message: message || `Upstream returned ${status}`
+    };
+  }
+
+  return { status: 0, message: "" };
 }
 
 function isCircuitOpen(model, target) {
@@ -434,9 +519,38 @@ async function checkProviderHealth(provider) {
   const baseUrl = String(provider.baseUrl || "").replace(/\/+$/, "");
   const headers = { accept: "application/json" };
   if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+  const healthModel = pickHealthCheckModel(provider);
 
   try {
     if (!baseUrl) throw new Error("missing baseUrl");
+    if (healthModel) {
+      headers["content-type"] = "application/json";
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: healthModel,
+          messages: [{ role: "user", content: "test" }],
+          max_tokens: 1,
+          stream: false
+        })
+      });
+      const text = await res.text();
+      const failure = classifyUpstreamFailure(res.status, text, res.ok);
+      if (failure) throw new Error(`HTTP ${failure.status}: ${failure.message}`);
+      return {
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        status: "online",
+        latency: Date.now() - startedAt,
+        models: Array.isArray(provider.models) && provider.models.length ? provider.models : [healthModel],
+        checkedModel: healthModel,
+        error: ""
+      };
+    }
+
     const res = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
     const text = await res.text();
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${trimError(text)}`);
@@ -448,6 +562,7 @@ async function checkProviderHealth(provider) {
       status: "online",
       latency: Date.now() - startedAt,
       models,
+      checkedModel: "",
       error: ""
     };
   } catch (err) {
@@ -458,6 +573,7 @@ async function checkProviderHealth(provider) {
       status: "offline",
       latency: Date.now() - startedAt,
       models: [],
+      checkedModel: healthModel,
       error: err.name === "AbortError" ? "timeout" : err.message
     };
   } finally {
@@ -477,7 +593,8 @@ function configuredProviders(cfg) {
       id: `${target.name || ""}|${target.baseUrl || ""}|${target.apiKey || ""}`,
       name: target.name || target.baseUrl,
       baseUrl: target.baseUrl,
-      apiKey: target.apiKey || ""
+      apiKey: target.apiKey || "",
+      modelName: target.modelName || ""
     }))
     .filter((provider) => {
       const key = `${provider.name}|${provider.baseUrl}|${provider.apiKey}`;
@@ -485,6 +602,27 @@ function configuredProviders(cfg) {
       seen.add(key);
       return true;
     });
+}
+
+function pickHealthCheckModel(provider) {
+  if (provider.healthCheckModel) return provider.healthCheckModel;
+  if (provider.modelName && !String(provider.modelName).includes("{model}")) return provider.modelName;
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  return models.find((model) => looksLikeChatModel(model)) || models[0] || "";
+}
+
+function looksLikeChatModel(modelName) {
+  const name = String(modelName || "").toLowerCase();
+  return name && ![
+    "embed",
+    "embedding",
+    "rerank",
+    "whisper",
+    "tts",
+    "image",
+    "dall",
+    "moderation"
+  ].some((token) => name.includes(token));
 }
 
 function extractSourceModels(payload) {
@@ -616,8 +754,9 @@ async function handleProxy(req, res, pathname, cfg) {
     try {
       upstream = await callTarget(req, pathname, body, model, target, cfg);
     } catch (err) {
-      recordTarget(model, target, false, cfg);
-      errors.push({ target: target.name, message: err.name === "AbortError" ? "timeout" : err.message });
+      const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+      recordTargetFailure(model, target, cfg, failure);
+      errors.push({ target: target.name, message: failure.message });
       failedModels.push(target.modelName || target.name || target.baseUrl);
       continue;
     }
@@ -625,10 +764,15 @@ async function handleProxy(req, res, pathname, cfg) {
     const responseType = upstream.headers.get("content-type") || (isStream ? "text/event-stream" : "application/json");
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => "");
-      recordTarget(model, target, false, cfg);
-      errors.push({ target: target.name, status: upstream.status, body: trimError(text) });
+      const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok) || {
+        status: upstream.status,
+        message: `Upstream returned ${upstream.status}`,
+        body: trimError(text)
+      };
+      recordTargetFailure(model, target, cfg, failure);
+      errors.push({ target: target.name, status: failure.status || upstream.status, body: failure.body || failure.message });
       failedModels.push(target.modelName || target.name || target.baseUrl);
-      if (shouldTryNext(upstream.status, cfg)) continue;
+      if (shouldTryNext(failure.status || upstream.status, cfg)) continue;
       stats.failures += 1;
       chain.failures += 1;
       addLog({
@@ -638,9 +782,59 @@ async function handleProxy(req, res, pathname, cfg) {
         finalModel: "",
         status: "failed",
         latency: Date.now() - startedAt,
-        error: `Upstream returned ${upstream.status}`
+        error: failure.message || `Upstream returned ${upstream.status}`
       });
       send(res, upstream.status, text || { error: { message: `Upstream returned ${upstream.status}` } }, { "content-type": responseType });
+      return;
+    }
+
+    if (!isStream) {
+      const text = await upstream.text().catch(() => "");
+      const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
+      if (failure) {
+        recordTargetFailure(model, target, cfg, failure);
+        errors.push({ target: target.name, status: failure.status, body: failure.body || failure.message });
+        failedModels.push(target.modelName || target.name || target.baseUrl);
+        if (shouldTryNext(failure.status, cfg)) continue;
+        stats.failures += 1;
+        chain.failures += 1;
+        addLog({
+          chainName: model.publicName,
+          originalModel: requestedModel,
+          failedModels,
+          finalModel: "",
+          status: "failed",
+          latency: Date.now() - startedAt,
+          error: failure.message
+        });
+        send(res, failure.status || 502, text || { error: { message: failure.message } }, { "content-type": responseType });
+        return;
+      }
+
+      recordTarget(model, target, true, cfg);
+      stats.successes += 1;
+      chain.successes += 1;
+      if (attempted > 1) {
+        stats.failovers += 1;
+        chain.failovers += 1;
+      }
+      addLog({
+        chainName: model.publicName,
+        originalModel: requestedModel,
+        failedModels,
+        finalModel: target.modelName || target.name || target.baseUrl,
+        status: "success",
+        latency: Date.now() - startedAt,
+        error: errors.length ? errors.map((item) => `${item.target || "target"}: ${item.status || item.message}`).join(", ") : ""
+      });
+
+      res.writeHead(upstream.status, withCors({
+        "content-type": responseType,
+        "cache-control": "no-cache",
+        "x-proxy-target": target.name || "",
+        "x-proxy-model": target.modelName || ""
+      }));
+      res.end(text);
       return;
     }
 

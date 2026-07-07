@@ -26,6 +26,7 @@ interface BackendConfig {
   circuitBreaker?: {
     failureThreshold?: number;
     cooldownMinutes?: number;
+    immediateCooldownStatusCodes?: number[];
   };
   modelSource?: unknown;
   models: BackendModel[];
@@ -84,7 +85,7 @@ type Action =
   | { type: 'DELETE_PROVIDER'; id: string }
   | { type: 'SET_PROVIDER_MODELS'; id: string; models: string[] }
   | { type: 'SET_PROVIDER_STATUS'; id: string; status: Provider['status']; latency?: number }
-  | { type: 'SET_PROVIDER_HEALTHS'; providers: Array<{ id?: string; name?: string; baseUrl: string; status: Provider['status']; latency?: number; models?: string[] }> }
+  | { type: 'SET_PROVIDER_HEALTHS'; providers: Array<{ id?: string; name?: string; baseUrl: string; status: Provider['status']; latency?: number; models?: string[]; error?: string }> }
   | { type: 'ADD_CHAIN'; chain: FailoverChain }
   | { type: 'UPDATE_CHAIN'; chain: FailoverChain }
   | { type: 'DELETE_CHAIN'; id: string }
@@ -98,6 +99,7 @@ const defaultConfig: BackendConfig = {
   circuitBreaker: {
     failureThreshold: 3,
     cooldownMinutes: 10,
+    immediateCooldownStatusCodes: [429],
   },
   modelSource: {
     enabled: false,
@@ -359,6 +361,7 @@ function uiToBackend(state: State): BackendConfig {
     circuitBreaker: {
       failureThreshold: Math.max(1, Math.floor(Number(state.circuitFailureThreshold) || 3)),
       cooldownMinutes: Math.max(1, Math.floor(Number(state.circuitCooldownMinutes) || 10)),
+      immediateCooldownStatusCodes: base.circuitBreaker?.immediateCooldownStatusCodes || [429],
     },
     models,
   };
@@ -457,6 +460,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       name: provider.name,
       baseUrl: provider.baseUrl,
       apiKey: provider.apiKey,
+      models: provider.models,
     })),
     [providerHealthSignature]
   );

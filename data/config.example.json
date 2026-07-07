@@ -21,7 +21,10 @@
   "requestTimeoutMs": 120000,
   "circuitBreaker": {
     "failureThreshold": 3,
-    "cooldownMinutes": 10
+    "cooldownMinutes": 10,
+    "immediateCooldownStatusCodes": [
+      429
+    ]
   },
   "modelSource": {
     "enabled": false,
