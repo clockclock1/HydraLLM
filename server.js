@@ -12,6 +12,7 @@ const configPath = process.env.CONFIG_PATH || path.join(dataDir, "config.json");
 const host = process.env.HOST || "0.0.0.0";
 const port = Number(process.env.PORT || 8787);
 const bodyLimitBytes = Number(process.env.BODY_LIMIT_MB || 50) * 1024 * 1024;
+const streamFailureProbeBytes = Number(process.env.STREAM_FAILURE_PROBE_KB || 64) * 1024;
 
 const jsonType = { "content-type": "application/json; charset=utf-8" };
 const textType = { "content-type": "text/plain; charset=utf-8" };
@@ -403,7 +404,10 @@ function classifyUpstreamFailure(statusCode, text, responseOk) {
   const status = Number(statusCode || 0);
   const body = String(text || "");
   const parsed = parseJsonSafe(body);
-  const embedded = embeddedError(parsed, body);
+  let embedded = embeddedError(parsed, body);
+  if (!embedded.message && embedded.status < 400) {
+    embedded = embeddedStreamError(body);
+  }
 
   if (!responseOk) {
     return {
@@ -464,6 +468,78 @@ function embeddedError(payload, text) {
   }
 
   return { status: 0, message: "" };
+}
+
+function embeddedStreamError(text) {
+  const body = String(text || "");
+  const events = parseSseDataPayloads(body);
+  for (const event of events) {
+    const parsed = parseJsonSafe(event);
+    const embedded = embeddedError(parsed, event);
+    if (embedded.message || embedded.status >= 400) return embedded;
+  }
+  return { status: 0, message: "" };
+}
+
+function parseSseDataPayloads(text) {
+  const events = [];
+  let current = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    if (!line.trim()) {
+      if (current.length) {
+        events.push(current.join("\n"));
+        current = [];
+      }
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      const data = line.slice(5).trimStart();
+      if (data && data !== "[DONE]") current.push(data);
+    }
+  }
+  if (current.length) events.push(current.join("\n"));
+  return events;
+}
+
+function streamProbeComplete(text) {
+  return /\r?\n\r?\n/.test(String(text || "")) || String(text || "").length >= streamFailureProbeBytes;
+}
+
+async function inspectInitialStream(upstream) {
+  if (!upstream.body) {
+    return { reader: null, chunks: [], failure: null };
+  }
+
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let text = "";
+
+  while (text.length < streamFailureProbeBytes) {
+    const { done, value } = await reader.read();
+    if (done) {
+      text += decoder.decode();
+      return {
+        reader,
+        chunks,
+        failure: classifyUpstreamFailure(upstream.status, text, upstream.ok)
+      };
+    }
+
+    chunks.push(value);
+    text += decoder.decode(value, { stream: true });
+
+    const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
+    if (failure) {
+      return { reader, chunks, failure };
+    }
+
+    if (streamProbeComplete(text)) {
+      return { reader, chunks, failure: null };
+    }
+  }
+
+  return { reader, chunks, failure: null };
 }
 
 function isCircuitOpen(model, target) {
@@ -865,22 +941,40 @@ async function handleProxy(req, res, pathname, cfg) {
         return;
       }
 
-      recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
-      stats.successes += 1;
-      chain.successes += 1;
-      if (failedModels.length > 0) {
-        stats.failovers += 1;
-        chain.failovers += 1;
+      let inspected;
+      try {
+        inspected = await inspectInitialStream(upstream);
+      } catch (err) {
+        const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+        recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
+        errors.push({ target: target.name, attempt, message: failure.message });
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        failedModels.push(targetLabel(target));
+        break;
       }
-      addLog({
-        chainName: model.publicName,
-        originalModel: requestedModel,
-        failedModels,
-        finalModel: targetLabel(target),
-        status: "success",
-        latency: Date.now() - startedAt,
-        error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
-      });
+
+      if (inspected.failure) {
+        await inspected.reader?.cancel().catch(() => undefined);
+        const failure = inspected.failure;
+        recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
+        errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        failedModels.push(targetLabel(target));
+        if (shouldTryNext(failure.status, cfg)) break;
+        stats.failures += 1;
+        chain.failures += 1;
+        addLog({
+          chainName: model.publicName,
+          originalModel: requestedModel,
+          failedModels,
+          finalModel: "",
+          status: "failed",
+          latency: Date.now() - startedAt,
+          error: failure.message
+        });
+        send(res, failure.status || 502, { error: { message: failure.message } });
+        return;
+      }
 
       const headers = withCors({
         "content-type": responseType,
@@ -891,19 +985,83 @@ async function handleProxy(req, res, pathname, cfg) {
 
       res.writeHead(upstream.status, headers);
 
-      if (!upstream.body) {
+      if (!inspected.reader) {
         res.end();
+        recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
+        stats.successes += 1;
+        chain.successes += 1;
+        if (failedModels.length > 0) {
+          stats.failovers += 1;
+          chain.failovers += 1;
+        }
+        addLog({
+          chainName: model.publicName,
+          originalModel: requestedModel,
+          failedModels,
+          finalModel: targetLabel(target),
+          status: "success",
+          latency: Date.now() - startedAt,
+          error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
+        });
         return;
       }
 
       try {
-        const reader = upstream.body.getReader();
+        const reader = inspected.reader;
+        const streamDecoder = new TextDecoder();
+        let streamText = "";
+        let streamFailure = null;
+        const detectStreamFailure = (chunk) => {
+          if (streamFailure) return;
+          streamText += streamDecoder.decode(chunk, { stream: true });
+          streamFailure = classifyUpstreamFailure(upstream.status, streamText, upstream.ok);
+        };
+
+        for (const chunk of inspected.chunks) {
+          detectStreamFailure(chunk);
+          res.write(Buffer.from(chunk));
+        }
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          detectStreamFailure(value);
           res.write(Buffer.from(value));
         }
+        streamText += streamDecoder.decode();
         res.end();
+        if (streamFailure) {
+          recordTargetFailure(model, target, cfg, streamFailure, Date.now() - targetStartedAt);
+          stats.failures += 1;
+          chain.failures += 1;
+          const streamFailedModels = [...failedModels, targetLabel(target)];
+          addLog({
+            chainName: model.publicName,
+            originalModel: requestedModel,
+            failedModels: streamFailedModels,
+            finalModel: "",
+            status: "failed",
+            latency: Date.now() - startedAt,
+            error: streamFailure.message
+          });
+          return;
+        }
+
+        recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
+        stats.successes += 1;
+        chain.successes += 1;
+        if (failedModels.length > 0) {
+          stats.failovers += 1;
+          chain.failovers += 1;
+        }
+        addLog({
+          chainName: model.publicName,
+          originalModel: requestedModel,
+          failedModels,
+          finalModel: targetLabel(target),
+          status: "success",
+          latency: Date.now() - startedAt,
+          error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
+        });
       } catch (err) {
         res.destroy(err);
       }
