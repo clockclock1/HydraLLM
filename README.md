@@ -99,8 +99,11 @@ Docker Compose：
 cd deploy/compose
 cp .env.example .env
 # 发布 Release 后把 HYDRALLM_VERSION 改成 v0.1.0 等版本号
+# 如需自定义宿主机端口，把 HYDRALLM_PORT 改成 18080 等端口
 docker compose up -d
 ```
+
+Compose 默认映射为 `8787:8787`。如果在 `.env` 中设置 `HYDRALLM_PORT=18080`，访问地址就是 `http://127.0.0.1:18080`，容器内部端口仍然是 `8787`。
 
 Kubernetes：
 
@@ -244,8 +247,11 @@ Docker Compose:
 cd deploy/compose
 cp .env.example .env
 # after publishing a Release, set HYDRALLM_VERSION to v0.1.0 or another tag
+# to customize the host port, set HYDRALLM_PORT to 18080 or another port
 docker compose up -d
 ```
+
+Compose maps `8787:8787` by default. If `.env` sets `HYDRALLM_PORT=18080`, open `http://127.0.0.1:18080`; the container port remains `8787`.
 
 Kubernetes:
 

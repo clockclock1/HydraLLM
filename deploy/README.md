@@ -21,6 +21,47 @@ docker compose up -d
 
 The service is exposed on `http://127.0.0.1:8787` by default. Configuration is persisted in the named Docker volume `hydrallm-data`.
 
+### Custom Host Port
+
+The container always listens on port `8787`, but you can map any host port to it through `.env`.
+
+Example: expose HydraLLM on host port `18080`:
+
+```bash
+cd deploy/compose
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```env
+HYDRALLM_IMAGE=ghcr.io/clockclock1/hydrallm
+HYDRALLM_VERSION=v0.1.0
+HYDRALLM_PORT=18080
+HYDRALLM_DATA_VOLUME=hydrallm-data
+```
+
+Start:
+
+```bash
+docker compose up -d
+```
+
+Then open:
+
+```text
+http://127.0.0.1:18080
+```
+
+Equivalent mapping in `docker-compose.yml`:
+
+```yaml
+ports:
+  - "${HYDRALLM_PORT:-8787}:8787"
+```
+
+The left side is the host port. The right side is the container port.
+
 ## Kubernetes
 
 Use the release tag that exists in GHCR:
