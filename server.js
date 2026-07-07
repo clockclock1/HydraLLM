@@ -519,38 +519,9 @@ async function checkProviderHealth(provider) {
   const baseUrl = String(provider.baseUrl || "").replace(/\/+$/, "");
   const headers = { accept: "application/json" };
   if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
-  const healthModel = pickHealthCheckModel(provider);
 
   try {
     if (!baseUrl) throw new Error("missing baseUrl");
-    if (healthModel) {
-      headers["content-type"] = "application/json";
-      const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers,
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: healthModel,
-          messages: [{ role: "user", content: "test" }],
-          max_tokens: 1,
-          stream: false
-        })
-      });
-      const text = await res.text();
-      const failure = classifyUpstreamFailure(res.status, text, res.ok);
-      if (failure) throw new Error(`HTTP ${failure.status}: ${failure.message}`);
-      return {
-        id: provider.id,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        status: "online",
-        latency: Date.now() - startedAt,
-        models: Array.isArray(provider.models) && provider.models.length ? provider.models : [healthModel],
-        checkedModel: healthModel,
-        error: ""
-      };
-    }
-
     const res = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
     const text = await res.text();
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${trimError(text)}`);
@@ -562,7 +533,6 @@ async function checkProviderHealth(provider) {
       status: "online",
       latency: Date.now() - startedAt,
       models,
-      checkedModel: "",
       error: ""
     };
   } catch (err) {
@@ -573,7 +543,6 @@ async function checkProviderHealth(provider) {
       status: "offline",
       latency: Date.now() - startedAt,
       models: [],
-      checkedModel: healthModel,
       error: err.name === "AbortError" ? "timeout" : err.message
     };
   } finally {
@@ -593,8 +562,7 @@ function configuredProviders(cfg) {
       id: `${target.name || ""}|${target.baseUrl || ""}|${target.apiKey || ""}`,
       name: target.name || target.baseUrl,
       baseUrl: target.baseUrl,
-      apiKey: target.apiKey || "",
-      modelName: target.modelName || ""
+      apiKey: target.apiKey || ""
     }))
     .filter((provider) => {
       const key = `${provider.name}|${provider.baseUrl}|${provider.apiKey}`;
@@ -602,27 +570,6 @@ function configuredProviders(cfg) {
       seen.add(key);
       return true;
     });
-}
-
-function pickHealthCheckModel(provider) {
-  if (provider.healthCheckModel) return provider.healthCheckModel;
-  if (provider.modelName && !String(provider.modelName).includes("{model}")) return provider.modelName;
-  const models = Array.isArray(provider.models) ? provider.models : [];
-  return models.find((model) => looksLikeChatModel(model)) || models[0] || "";
-}
-
-function looksLikeChatModel(modelName) {
-  const name = String(modelName || "").toLowerCase();
-  return name && ![
-    "embed",
-    "embedding",
-    "rerank",
-    "whisper",
-    "tts",
-    "image",
-    "dall",
-    "moderation"
-  ].some((token) => name.includes(token));
 }
 
 function extractSourceModels(payload) {
