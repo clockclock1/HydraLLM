@@ -34,7 +34,7 @@ export interface FailoverChain {
   successRate: number;
 }
 
-export type Page = 'dashboard' | 'providers' | 'chains' | 'endpoints' | 'logs';
+export type Page = 'dashboard' | 'providers' | 'chains' | 'endpoints' | 'logs' | 'settings';
 
 export interface LogEntry {
   id: string;

@@ -5,6 +5,7 @@ import Providers from './components/Providers';
 import FailoverChains from './components/FailoverChains';
 import ProxyEndpoints from './components/ProxyEndpoints';
 import Logs from './components/Logs';
+import Settings from './components/Settings';
 
 function PageContent() {
   const { state } = useStore();
@@ -15,6 +16,7 @@ function PageContent() {
     chains: <FailoverChains />,
     endpoints: <ProxyEndpoints />,
     logs: <Logs />,
+    settings: <Settings />,
   };
 
   return pages[state.currentPage] || <Dashboard />;

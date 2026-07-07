@@ -1,12 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Plus,
   Trash2,
   Edit3,
   X,
   GitBranch,
-  ArrowUp,
-  ArrowDown,
+  GripVertical,
   Power,
   PowerOff,
   Copy,
@@ -15,9 +14,6 @@ import {
   Shuffle,
   Layers,
   ArrowRight,
-  Timer,
-  RotateCcw,
-  Weight,
   Gauge,
   Zap,
 } from 'lucide-react';
@@ -29,25 +25,35 @@ import { cn } from '../utils/cn';
 const strategyLabels: Record<FailoverChain['strategy'], { label: string; desc: string; icon: React.ReactNode }> = {
   'priority': { label: '优先级', desc: '按优先级顺序依次尝试', icon: <Layers size={14} /> },
   'round-robin': { label: '轮询', desc: '循环使用各模型', icon: <Shuffle size={14} /> },
-  'weighted': { label: '加权', desc: '按权重比例分配请求', icon: <Weight size={14} /> },
+  'weighted': { label: '优先级', desc: '按优先级顺序依次尝试', icon: <Layers size={14} /> },
   'latency-based': { label: '最低延迟', desc: '优先使用延迟最低的模型', icon: <Gauge size={14} /> },
 };
+
+const visibleStrategies: FailoverChain['strategy'][] = ['priority', 'round-robin', 'latency-based'];
 
 function normalizeQueue(items: FailoverModel[]) {
   return [...items]
     .sort((a, b) => a.priority - b.priority)
-    .map((model, index) => ({
-      ...model,
-      priority: index + 1,
-      timeout: Math.max(1, Number(model.timeout) || 30),
-      maxRetries: Math.max(0, Number(model.maxRetries) || 0),
-      weight: Math.max(1, Number(model.weight) || 1),
-      enabled: model.enabled !== false,
-    }));
+    .map(normalizeQueueItem);
 }
 
-function modelQueueKey(model: FailoverModel, index: number) {
-  return `${model.providerId}:${model.modelName}:${index}`;
+function renumberQueue(items: FailoverModel[]) {
+  return items.map(normalizeQueueItem);
+}
+
+function normalizeQueueItem(model: FailoverModel, index: number) {
+  return {
+    ...model,
+    priority: index + 1,
+    timeout: Math.max(1, Number(model.timeout) || 30),
+    maxRetries: Math.max(0, Number(model.maxRetries) || 0),
+    weight: 1,
+    enabled: model.enabled !== false,
+  };
+}
+
+function modelQueueKey(model: FailoverModel) {
+  return `${model.providerId}:${model.modelName}`;
 }
 
 function ChainEditor({
@@ -62,18 +68,23 @@ function ChainEditor({
   const { state } = useStore();
   const [name, setName] = useState(chain?.name || '');
   const [description, setDescription] = useState(chain?.description || '');
-  const [strategy, setStrategy] = useState<FailoverChain['strategy']>(chain?.strategy || 'priority');
+  const [strategy, setStrategy] = useState<FailoverChain['strategy']>(chain?.strategy === 'weighted' ? 'priority' : chain?.strategy || 'priority');
   const [proxyModelName, setProxyModelName] = useState(chain?.proxyModelName || '');
   const [proxyApiKey, setProxyApiKey] = useState(chain?.proxyApiKey || 'fpk-' + uuidv4().slice(0, 24));
   const [models, setModels] = useState<FailoverModel[]>(() => normalizeQueue(chain?.models || []));
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const queueRef = useRef<HTMLDivElement | null>(null);
+  const draggedIndexRef = useRef<number | null>(null);
+  const dragPointerRef = useRef<number | null>(null);
 
   const addModel = (providerId: string, modelName: string) => {
     if (models.find(m => m.providerId === providerId && m.modelName === modelName)) return;
-    setModels(current => normalizeQueue([...current, {
+    setModels(current => renumberQueue([...normalizeQueue(current), {
       providerId,
       modelName,
       priority: current.length + 1,
-      weight: Math.max(1, Math.floor(100 / (current.length + 1))),
+      weight: 1,
       maxRetries: 2,
       timeout: 30,
       enabled: true,
@@ -81,23 +92,88 @@ function ChainEditor({
   };
 
   const removeModel = (idx: number) => {
-    setModels(current => normalizeQueue(current)
-      .filter((_, i) => i !== idx)
-      .map((model, i) => ({ ...model, priority: i + 1 })));
+    setModels(current => renumberQueue(normalizeQueue(current).filter((_, i) => i !== idx)));
   };
 
-  const moveModel = (idx: number, dir: -1 | 1) => {
+  const reorderModel = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
     setModels(current => {
       const next = normalizeQueue(current);
-      const target = idx + dir;
-      if (target < 0 || target >= next.length) return next;
-      [next[idx], next[target]] = [next[target], next[idx]];
-      return normalizeQueue(next);
+      if (fromIndex < 0 || fromIndex >= next.length || toIndex < 0 || toIndex >= next.length) return next;
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return renumberQueue(next);
     });
   };
 
+  const resetDragState = () => {
+    dragPointerRef.current = null;
+    draggedIndexRef.current = null;
+    setDraggedIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const findPointerTargetIndex = (clientY: number) => {
+    const items = Array.from(queueRef.current?.querySelectorAll<HTMLElement>('[data-queue-index]') || []);
+    if (!items.length) return null;
+
+    let closest = 0;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    items.forEach((item) => {
+      const index = Number(item.dataset.queueIndex);
+      const rect = item.getBoundingClientRect();
+      const distance = Math.abs(clientY - (rect.top + rect.height / 2));
+      if (distance < closestDistance) {
+        closest = index;
+        closestDistance = distance;
+      }
+    });
+    return closest;
+  };
+
+  const handleDragStart = (event: React.PointerEvent, idx: number) => {
+    event.preventDefault();
+    dragPointerRef.current = event.pointerId;
+    draggedIndexRef.current = idx;
+    setDraggedIndex(idx);
+    setDragOverIndex(idx);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveModel = (idx: number, direction: -1 | 1) => {
+    reorderModel(idx, idx + direction);
+  };
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      if (dragPointerRef.current !== event.pointerId || draggedIndexRef.current === null) return;
+      event.preventDefault();
+      const targetIndex = findPointerTargetIndex(event.clientY);
+      if (targetIndex === null) return;
+      setDragOverIndex(targetIndex);
+      if (targetIndex !== draggedIndexRef.current) {
+        reorderModel(draggedIndexRef.current, targetIndex);
+        draggedIndexRef.current = targetIndex;
+        setDraggedIndex(targetIndex);
+      }
+    };
+
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (dragPointerRef.current === event.pointerId) resetDragState();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove, { capture: true, passive: false });
+    window.addEventListener('pointerup', handlePointerEnd, true);
+    window.addEventListener('pointercancel', handlePointerEnd, true);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove, true);
+      window.removeEventListener('pointerup', handlePointerEnd, true);
+      window.removeEventListener('pointercancel', handlePointerEnd, true);
+    };
+  }, []);
+
   const updateModel = (idx: number, updates: Partial<FailoverModel>) => {
-    setModels(current => normalizeQueue(current).map((m, i) => i === idx ? { ...m, ...updates } : m));
+    setModels(current => renumberQueue(normalizeQueue(current).map((m, i) => i === idx ? { ...m, ...updates } : m)));
   };
 
   const handleSave = () => {
@@ -186,7 +262,7 @@ function ChainEditor({
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">故障转移策略</label>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-              {(Object.keys(strategyLabels) as FailoverChain['strategy'][]).map(s => (
+              {visibleStrategies.map(s => (
                 <button
                   key={s}
                   onClick={() => setStrategy(s)}
@@ -243,16 +319,33 @@ function ChainEditor({
               <label className="block text-sm font-medium text-slate-700 mb-2">
                 转移链配置 ({orderedModels.length} 个模型)
               </label>
-              <div className="space-y-2">
+              <div ref={queueRef} className="space-y-2">
                 {orderedModels.map((model, idx) => {
                   const provider = state.providers.find(p => p.id === model.providerId);
                   return (
-                    <div key={modelQueueKey(model, idx)} className={cn(
-                      'border rounded-lg p-3 transition-all',
-                      model.enabled ? 'border-slate-200 bg-white' : 'border-slate-200 bg-slate-50 opacity-60'
-                    )}>
+                    <div
+                      key={modelQueueKey(model)}
+                      data-queue-index={idx}
+                      className={cn(
+                        'border rounded-lg p-3 transition-all select-none',
+                        model.enabled ? 'border-slate-200 bg-white' : 'border-slate-200 bg-slate-50 opacity-60',
+                        draggedIndex === idx && 'scale-[0.99] opacity-50',
+                        dragOverIndex === idx && draggedIndex !== idx && 'border-blue-300 bg-blue-50/40 shadow-sm'
+                      )}
+                    >
                       <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start mb-3">
                         <div className="flex min-w-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onPointerDown={event => handleDragStart(event, idx)}
+                            onPointerUp={resetDragState}
+                            onPointerCancel={resetDragState}
+                            className="inline-flex h-7 w-7 touch-none flex-shrink-0 cursor-grab items-center justify-center rounded-md border border-slate-200 bg-white text-slate-400 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 active:cursor-grabbing"
+                            title="拖动调整顺序"
+                            aria-label={`调整 ${model.modelName} 的顺序`}
+                          >
+                            <GripVertical size={15} />
+                          </button>
                           <span className={cn(
                             'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
                             idx === 0 ? 'bg-blue-100 text-blue-600' :
@@ -271,21 +364,21 @@ function ChainEditor({
                             type="button"
                             onClick={() => moveModel(idx, -1)}
                             disabled={idx === 0}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
-                            title="上移模型"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                            title="上移"
+                            aria-label={`上移 ${model.modelName}`}
                           >
-                            <ArrowUp size={13} />
-                            上移
+                            <ChevronUp size={14} />
                           </button>
                           <button
                             type="button"
                             onClick={() => moveModel(idx, 1)}
                             disabled={idx === orderedModels.length - 1}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
-                            title="下移模型"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                            title="下移"
+                            aria-label={`下移 ${model.modelName}`}
                           >
-                            <ArrowDown size={13} />
-                            下移
+                            <ChevronDown size={14} />
                           </button>
                           <button
                             type="button"
@@ -313,42 +406,6 @@ function ChainEditor({
                         </div>
                       </div>
 
-                      {/* Model settings */}
-                      <div className="grid grid-cols-1 gap-3 mt-2 md:grid-cols-3">
-                        <div>
-                          <label className="text-[10px] text-slate-400 flex items-center gap-1 mb-0.5">
-                            <Timer size={10} /> 超时(秒)
-                          </label>
-                          <input
-                            type="number"
-                            value={model.timeout}
-                            onChange={e => updateModel(idx, { timeout: Number(e.target.value) })}
-                            className="w-full px-2 py-1 text-xs rounded border border-slate-200 focus:border-blue-500 outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-slate-400 flex items-center gap-1 mb-0.5">
-                            <RotateCcw size={10} /> 最大重试
-                          </label>
-                          <input
-                            type="number"
-                            value={model.maxRetries}
-                            onChange={e => updateModel(idx, { maxRetries: Number(e.target.value) })}
-                            className="w-full px-2 py-1 text-xs rounded border border-slate-200 focus:border-blue-500 outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-slate-400 flex items-center gap-1 mb-0.5">
-                            <Weight size={10} /> 权重
-                          </label>
-                          <input
-                            type="number"
-                            value={model.weight}
-                            onChange={e => updateModel(idx, { weight: Number(e.target.value) })}
-                            className="w-full px-2 py-1 text-xs rounded border border-slate-200 focus:border-blue-500 outline-none"
-                          />
-                        </div>
-                      </div>
                     </div>
                   );
                 })}
@@ -535,7 +592,6 @@ export default function FailoverChains() {
                               </div>
                               <p className="text-xs font-mono font-medium text-slate-700 truncate">{m.modelName}</p>
                               <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-400">
-                                <span>W:{m.weight}</span>
                                 <span>T:{m.timeout}s</span>
                                 <span>R:{m.maxRetries}</span>
                               </div>

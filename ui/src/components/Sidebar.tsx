@@ -5,6 +5,7 @@ import {
   GitBranch,
   Link2,
   ScrollText,
+  SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
   Shield,
@@ -21,6 +22,7 @@ const navItems: { page: Page; label: string; icon: React.ReactNode }[] = [
   { page: 'chains', label: '故障转移链', icon: <GitBranch size={20} /> },
   { page: 'endpoints', label: '代理端点', icon: <Link2 size={20} /> },
   { page: 'logs', label: '请求日志', icon: <ScrollText size={20} /> },
+  { page: 'settings', label: '队列设置', icon: <SlidersHorizontal size={20} /> },
 ];
 
 export default function Sidebar() {
@@ -81,39 +83,6 @@ export default function Sidebar() {
               type="password"
             />
           </label>
-          <div className="grid grid-cols-2 gap-2">
-            <label className="block">
-              <span className="text-[10px] uppercase tracking-wide text-slate-500">Failures</span>
-              <input
-                value={state.circuitFailureThreshold}
-                onChange={e => dispatch({
-                  type: 'SET_CIRCUIT_SETTINGS',
-                  failureThreshold: Number(e.target.value),
-                  cooldownMinutes: state.circuitCooldownMinutes,
-                })}
-                min={1}
-                className="mt-1 w-full rounded-lg bg-slate-950/50 border border-slate-700 px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500"
-                type="number"
-              />
-            </label>
-            <label className="block">
-              <span className="text-[10px] uppercase tracking-wide text-slate-500">Cooldown</span>
-              <input
-                value={state.circuitCooldownMinutes}
-                onChange={e => dispatch({
-                  type: 'SET_CIRCUIT_SETTINGS',
-                  failureThreshold: state.circuitFailureThreshold,
-                  cooldownMinutes: Number(e.target.value),
-                })}
-                min={1}
-                className="mt-1 w-full rounded-lg bg-slate-950/50 border border-slate-700 px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500"
-                type="number"
-              />
-            </label>
-          </div>
-          <p className="text-[10px] leading-4 text-slate-500">
-            连续失败次数 / 禁用分钟数
-          </p>
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={() => {
