@@ -323,7 +323,8 @@ function upstreamUrl(target, pathname) {
 }
 
 function shouldTryNext(statusCode, cfg) {
-  return cfg.failoverStatusCodes.includes(Number(statusCode));
+  const status = Number(statusCode);
+  return status >= 400 || cfg.failoverStatusCodes.includes(status);
 }
 
 function classifyUpstreamFailure(statusCode, text, responseOk) {

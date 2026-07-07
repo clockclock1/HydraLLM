@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useCallback, useEffect, useReducer, type ReactNode } from 'react';
+import React, { createContext, useContext, useCallback, useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { Provider, FailoverChain, Page, LogEntry } from './types';
 
@@ -196,7 +196,6 @@ function reducer(state: State, action: Action): State {
             status: health.status,
             latency: health.latency,
             lastCheck: Date.now(),
-            models: health.models?.length ? health.models : provider.models,
           };
         }),
       };
@@ -449,26 +448,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return body.models || [];
   }, [state.adminToken]);
 
-  const refreshProviderHealth = useCallback(async () => {
-    if (!state.configLoaded || !state.providers.length) return;
-    const providers = state.providers.map((provider) => ({
+  const providerHealthSignature = useMemo(
+    () => state.providers.map((provider) => `${provider.id}:${provider.name}:${provider.baseUrl}:${provider.apiKey}`).join('|'),
+    [state.providers]
+  );
+
+  const providerHealthRequest = useMemo(
+    () => state.providers.map((provider) => ({
       id: provider.id,
       name: provider.name,
       baseUrl: provider.baseUrl,
       apiKey: provider.apiKey,
-    }));
+    })),
+    [providerHealthSignature]
+  );
+
+  const refreshProviderHealth = useCallback(async () => {
+    if (!state.configLoaded || !providerHealthRequest.length) return;
     const res = await fetch('/api/providers/health', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-admin-token': state.adminToken,
       },
-      body: JSON.stringify({ providers }),
+      body: JSON.stringify({ providers: providerHealthRequest }),
     });
     if (!res.ok) throw new Error(await readJsonError(res));
     const body = await res.json();
     dispatch({ type: 'SET_PROVIDER_HEALTHS', providers: body.providers || [] });
-  }, [state.adminToken, state.configLoaded, state.providers]);
+  }, [state.adminToken, state.configLoaded, providerHealthRequest]);
 
   useEffect(() => {
     loadConfig().catch(() => undefined);
@@ -486,6 +494,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }, 10000);
     return () => window.clearInterval(timer);
   }, [state.configLoaded, state.adminToken]);
+
+  useEffect(() => {
+    if (!state.configLoaded || !state.providers.length) return;
+    refreshProviderHealth().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      refreshProviderHealth().catch(() => undefined);
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [state.configLoaded, providerHealthSignature, refreshProviderHealth]);
 
   return (
     <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels, refreshProviderHealth }}>
