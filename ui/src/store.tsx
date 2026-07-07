@@ -27,6 +27,30 @@ interface BackendConfig {
   models: BackendModel[];
 }
 
+interface BackendStats {
+  requests: number;
+  successes: number;
+  failures: number;
+  failovers?: number;
+  chains?: Record<string, {
+    requests: number;
+    successes: number;
+    failures: number;
+    failovers: number;
+  }>;
+  logs?: Array<{
+    id: string;
+    timestamp: number;
+    chainName: string;
+    originalModel: string;
+    failedModels: string[];
+    finalModel: string;
+    status: 'success' | 'failed';
+    latency: number;
+    error?: string;
+  }>;
+}
+
 interface State {
   currentPage: Page;
   providers: Provider[];
@@ -38,6 +62,7 @@ interface State {
   saveStatus: 'idle' | 'loading' | 'saving' | 'saved' | 'error';
   saveError: string;
   backendConfig: BackendConfig | null;
+  backendStats: BackendStats | null;
 }
 
 type Action =
@@ -45,7 +70,8 @@ type Action =
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_ADMIN_TOKEN'; token: string }
   | { type: 'SET_SAVE_STATUS'; status: State['saveStatus']; error?: string }
-  | { type: 'LOAD_BACKEND_CONFIG'; config: BackendConfig }
+  | { type: 'LOAD_BACKEND_STATE'; config: BackendConfig; stats?: BackendStats | null }
+  | { type: 'LOAD_BACKEND_STATS'; stats: BackendStats }
   | { type: 'ADD_PROVIDER'; provider: Provider }
   | { type: 'UPDATE_PROVIDER'; provider: Provider }
   | { type: 'DELETE_PROVIDER'; id: string }
@@ -86,6 +112,7 @@ const initialState: State = {
   saveStatus: 'idle',
   saveError: '',
   backendConfig: null,
+  backendStats: null,
 };
 
 function reducer(state: State, action: Action): State {
@@ -99,17 +126,20 @@ function reducer(state: State, action: Action): State {
       return { ...state, adminToken: action.token };
     case 'SET_SAVE_STATUS':
       return { ...state, saveStatus: action.status, saveError: action.error || '' };
-    case 'LOAD_BACKEND_CONFIG': {
-      const mapped = backendToUi(action.config);
+    case 'LOAD_BACKEND_STATE': {
+      const mapped = backendToUi(action.config, action.stats || null);
       return {
         ...state,
         ...mapped,
         backendConfig: action.config,
+        backendStats: action.stats || null,
         configLoaded: true,
         saveStatus: 'idle',
         saveError: '',
       };
     }
+    case 'LOAD_BACKEND_STATS':
+      return applyStatsToState(state, action.stats);
     case 'ADD_PROVIDER':
       return { ...state, providers: [...state.providers, action.provider] };
     case 'UPDATE_PROVIDER':
@@ -140,7 +170,37 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-function backendToUi(config: BackendConfig): Pick<State, 'providers' | 'chains' | 'logs'> {
+function applyStatsToState(state: State, stats: BackendStats): State {
+  return {
+    ...state,
+    backendStats: stats,
+    chains: state.chains.map((chain) => {
+      const modelStats = stats.chains?.[chain.proxyModelName];
+      if (!modelStats) return chain;
+      const totalFinished = modelStats.successes + modelStats.failures;
+      const successRate = totalFinished ? Number(((modelStats.successes / totalFinished) * 100).toFixed(1)) : 100;
+      return {
+        ...chain,
+        totalRequests: modelStats.requests,
+        failoverCount: modelStats.failovers,
+        successRate,
+      };
+    }),
+    logs: (stats.logs || []).map((log) => ({
+      id: log.id,
+      timestamp: log.timestamp,
+      chainName: log.chainName,
+      originalModel: log.originalModel,
+      failedModels: log.failedModels || [],
+      finalModel: log.finalModel,
+      status: log.status,
+      latency: log.latency,
+      error: log.error,
+    })),
+  };
+}
+
+function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<State, 'providers' | 'chains' | 'logs'> {
   const providers: Provider[] = [];
   const providerKeyToId = new Map<string, string>();
   const firstProxyKey = config.proxyKeys.find(key => key.enabled !== false)?.key || 'sk-local-test';
@@ -166,6 +226,10 @@ function backendToUi(config: BackendConfig): Pick<State, 'providers' | 'chains' 
   }
 
   const chains: FailoverChain[] = (config.models || []).map((model) => {
+    const modelStats = stats?.chains?.[model.publicName];
+    const totalRequests = modelStats?.requests || 0;
+    const totalFinished = (modelStats?.successes || 0) + (modelStats?.failures || 0);
+    const successRate = totalFinished ? Number((((modelStats?.successes || 0) / totalFinished) * 100).toFixed(1)) : 100;
     const models = (model.targets || []).map((target, index) => {
       const providerId = ensureProvider(target);
       const provider = providers.find(item => item.id === providerId);
@@ -194,13 +258,25 @@ function backendToUi(config: BackendConfig): Pick<State, 'providers' | 'chains' 
       proxyApiKey: firstProxyKey,
       enabled: model.enabled !== false,
       createdAt: Date.now(),
-      totalRequests: 0,
-      failoverCount: 0,
-      successRate: 100,
+      totalRequests,
+      failoverCount: modelStats?.failovers || 0,
+      successRate,
     };
   });
 
-  return { providers, chains, logs: [] };
+  const logs: LogEntry[] = (stats?.logs || []).map((log) => ({
+    id: log.id,
+    timestamp: log.timestamp,
+    chainName: log.chainName,
+    originalModel: log.originalModel,
+    failedModels: log.failedModels || [],
+    finalModel: log.finalModel,
+    status: log.status,
+    latency: log.latency,
+    error: log.error,
+  }));
+
+  return { providers, chains, logs };
 }
 
 function uiToBackend(state: State): BackendConfig {
@@ -279,7 +355,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       throw new Error(message);
     }
     const config = await res.json();
-    dispatch({ type: 'LOAD_BACKEND_CONFIG', config });
+    const stats = await fetch('/api/stats', {
+      headers: { 'x-admin-token': token },
+    }).then((statsRes) => statsRes.ok ? statsRes.json() : null).catch(() => null);
+    dispatch({ type: 'LOAD_BACKEND_STATE', config, stats });
   };
 
   const saveConfig = async (tokenOverride?: string) => {
@@ -300,7 +379,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       throw new Error(message);
     }
     const body = await res.json();
-    dispatch({ type: 'LOAD_BACKEND_CONFIG', config: body.config });
+    const stats = await fetch('/api/stats', {
+      headers: { 'x-admin-token': token },
+    }).then((statsRes) => statsRes.ok ? statsRes.json() : null).catch(() => null);
+    dispatch({ type: 'LOAD_BACKEND_STATE', config: body.config, stats });
     dispatch({ type: 'SET_SAVE_STATUS', status: 'saved' });
   };
 
@@ -321,6 +403,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     loadConfig().catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!state.configLoaded) return;
+      fetch('/api/stats', { headers: { 'x-admin-token': state.adminToken } })
+        .then((res) => res.ok ? res.json() : null)
+        .then((stats) => {
+          if (stats) dispatch({ type: 'LOAD_BACKEND_STATS', stats });
+        })
+        .catch(() => undefined);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [state.configLoaded, state.adminToken]);
 
   return (
     <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels }}>

@@ -6,3 +6,4 @@ dist/
 output/
 data/config.json
 model-failover-proxy-ui.zip
+deploy/compose/data/

@@ -105,6 +105,8 @@ docker compose up -d
 
 Compose 默认映射为 `8787:8787`。如果在 `.env` 中设置 `HYDRALLM_PORT=18080`，访问地址就是 `http://127.0.0.1:18080`，容器内部端口仍然是 `8787`。
 
+Compose 默认把数据保存到 clone 下来的项目目录 `deploy/compose/data`，并自动创建 `hydrallm-network` 网络。可以在 `.env` 中通过 `HYDRALLM_DATA_DIR` 和 `HYDRALLM_NETWORK` 修改。
+
 Kubernetes：
 
 ```bash
@@ -252,6 +254,8 @@ docker compose up -d
 ```
 
 Compose maps `8787:8787` by default. If `.env` sets `HYDRALLM_PORT=18080`, open `http://127.0.0.1:18080`; the container port remains `8787`.
+
+Compose stores data in the cloned project folder at `deploy/compose/data` by default and automatically creates the `hydrallm-network` network. You can customize them with `HYDRALLM_DATA_DIR` and `HYDRALLM_NETWORK` in `.env`.
 
 Kubernetes:
 

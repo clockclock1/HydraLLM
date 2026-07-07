@@ -10,7 +10,9 @@ services:
     ports:
       - "${HYDRALLM_PORT:-8787}:8787"
     volumes:
-      - hydrallm-data:/app/data
+      - ${HYDRALLM_DATA_DIR:-./data}:/app/data
+    networks:
+      - hydrallm-network
     healthcheck:
       test:
         - CMD
@@ -22,6 +24,7 @@ services:
       retries: 3
       start_period: 20s
 
-volumes:
-  hydrallm-data:
-    name: ${HYDRALLM_DATA_VOLUME:-hydrallm-data}
+networks:
+  hydrallm-network:
+    name: ${HYDRALLM_NETWORK:-hydrallm-network}
+    driver: bridge

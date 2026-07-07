@@ -502,6 +502,19 @@ export default function FailoverChains() {
                                 <span>T:{m.timeout}s</span>
                                 <span>R:{m.maxRetries}</span>
                               </div>
+                              <button
+                                onClick={() => {
+                                  const nextModels = chain.models
+                                    .filter((_, modelIndex) => modelIndex !== i)
+                                    .map((item, modelIndex) => ({ ...item, priority: modelIndex + 1 }));
+                                  dispatch({ type: 'UPDATE_CHAIN', chain: { ...chain, models: nextModels } });
+                                }}
+                                className="mt-2 flex items-center gap-1 text-[10px] text-red-500 hover:text-red-600"
+                                title="删除该模型"
+                              >
+                                <Trash2 size={10} />
+                                删除
+                              </button>
                             </div>
                             {i < chain.models.length - 1 && (
                               <div className="flex flex-col items-center flex-shrink-0">

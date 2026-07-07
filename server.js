@@ -30,8 +30,15 @@ const stats = {
   requests: 0,
   successes: 0,
   failures: 0,
-  targets: {}
+  failovers: 0,
+  targets: {},
+  chains: {},
+  logs: []
 };
+
+const circuitBreakers = new Map();
+const circuitFailureThreshold = Number(process.env.CIRCUIT_FAILURE_THRESHOLD || 3);
+const circuitCooldownMs = Number(process.env.CIRCUIT_COOLDOWN_MS || 10 * 60 * 1000);
 
 const defaultConfig = {
   adminToken: "admin",
@@ -239,18 +246,45 @@ async function findModel(cfg, publicName) {
 }
 
 function enabledTargets(model) {
-  return (model.targets || []).filter((target) => target.enabled !== false && target.baseUrl && target.apiKey);
+  const configured = (model.targets || []).filter((target) => target.enabled !== false && target.baseUrl && target.apiKey);
+  const available = configured.filter((target) => !isCircuitOpen(model, target));
+  if (!configured.length || available.length) return available;
+
+  resetModelCircuits(model);
+  return configured;
 }
 
 function targetKey(model, target) {
-  return `${model.publicName}/${target.name || target.modelName || target.baseUrl}`;
+  return `${model.publicName}/${target.name || ""}/${target.modelName || ""}/${target.baseUrl || ""}`;
 }
 
 function recordTarget(model, target, ok) {
   const key = targetKey(model, target);
-  stats.targets[key] ||= { ok: 0, error: 0 };
-  if (ok) stats.targets[key].ok += 1;
-  else stats.targets[key].error += 1;
+  stats.targets[key] ||= {
+    model: model.publicName,
+    target: target.name || target.modelName || target.baseUrl,
+    upstreamModel: target.modelName || "",
+    baseUrl: target.baseUrl || "",
+    ok: 0,
+    error: 0,
+    consecutiveFailures: 0,
+    disabledUntil: 0
+  };
+  if (ok) {
+    stats.targets[key].ok += 1;
+    stats.targets[key].consecutiveFailures = 0;
+    circuitBreakers.delete(key);
+  } else {
+    stats.targets[key].error += 1;
+    const breaker = circuitBreakers.get(key) || { failures: 0, disabledUntil: 0 };
+    breaker.failures += 1;
+    if (breaker.failures >= circuitFailureThreshold) {
+      breaker.disabledUntil = Date.now() + circuitCooldownMs;
+    }
+    circuitBreakers.set(key, breaker);
+    stats.targets[key].consecutiveFailures = breaker.failures;
+    stats.targets[key].disabledUntil = breaker.disabledUntil || 0;
+  }
 }
 
 function upstreamUrl(target, pathname) {
@@ -260,6 +294,51 @@ function upstreamUrl(target, pathname) {
 
 function shouldTryNext(statusCode, cfg) {
   return cfg.failoverStatusCodes.includes(Number(statusCode));
+}
+
+function isCircuitOpen(model, target) {
+  const key = targetKey(model, target);
+  const breaker = circuitBreakers.get(key);
+  if (!breaker?.disabledUntil) return false;
+  if (Date.now() >= breaker.disabledUntil) {
+    circuitBreakers.delete(key);
+    if (stats.targets[key]) {
+      stats.targets[key].consecutiveFailures = 0;
+      stats.targets[key].disabledUntil = 0;
+    }
+    return false;
+  }
+  return true;
+}
+
+function resetModelCircuits(model) {
+  for (const target of model.targets || []) {
+    const key = targetKey(model, target);
+    circuitBreakers.delete(key);
+    if (stats.targets[key]) {
+      stats.targets[key].consecutiveFailures = 0;
+      stats.targets[key].disabledUntil = 0;
+    }
+  }
+}
+
+function chainStats(model) {
+  stats.chains[model.publicName] ||= {
+    requests: 0,
+    successes: 0,
+    failures: 0,
+    failovers: 0
+  };
+  return stats.chains[model.publicName];
+}
+
+function addLog(entry) {
+  stats.logs.unshift({
+    id: crypto.randomUUID(),
+    timestamp: Date.now(),
+    ...entry
+  });
+  stats.logs = stats.logs.slice(0, 500);
 }
 
 function sourceCacheKey(source) {
@@ -451,16 +530,23 @@ async function handleProxy(req, res, pathname, cfg) {
   }
 
   stats.requests += 1;
+  const chain = chainStats(model);
+  chain.requests += 1;
+  const startedAt = Date.now();
   const isStream = body.stream === true;
   const errors = [];
+  const failedModels = [];
+  let attempted = 0;
 
   for (const target of targets) {
+    attempted += 1;
     let upstream;
     try {
       upstream = await callTarget(req, pathname, body, model, target, cfg);
     } catch (err) {
       recordTarget(model, target, false);
       errors.push({ target: target.name, message: err.name === "AbortError" ? "timeout" : err.message });
+      failedModels.push(target.modelName || target.name || target.baseUrl);
       continue;
     }
 
@@ -469,14 +555,39 @@ async function handleProxy(req, res, pathname, cfg) {
       const text = await upstream.text().catch(() => "");
       recordTarget(model, target, false);
       errors.push({ target: target.name, status: upstream.status, body: trimError(text) });
+      failedModels.push(target.modelName || target.name || target.baseUrl);
       if (shouldTryNext(upstream.status, cfg)) continue;
       stats.failures += 1;
+      chain.failures += 1;
+      addLog({
+        chainName: model.publicName,
+        originalModel: requestedModel,
+        failedModels,
+        finalModel: "",
+        status: "failed",
+        latency: Date.now() - startedAt,
+        error: `Upstream returned ${upstream.status}`
+      });
       send(res, upstream.status, text || { error: { message: `Upstream returned ${upstream.status}` } }, { "content-type": responseType });
       return;
     }
 
     recordTarget(model, target, true);
     stats.successes += 1;
+    chain.successes += 1;
+    if (attempted > 1) {
+      stats.failovers += 1;
+      chain.failovers += 1;
+    }
+    addLog({
+      chainName: model.publicName,
+      originalModel: requestedModel,
+      failedModels,
+      finalModel: target.modelName || target.name || target.baseUrl,
+      status: "success",
+      latency: Date.now() - startedAt,
+      error: errors.length ? errors.map((item) => `${item.target || "target"}: ${item.status || item.message}`).join(", ") : ""
+    });
 
     const headers = withCors({
       "content-type": responseType,
@@ -507,6 +618,16 @@ async function handleProxy(req, res, pathname, cfg) {
   }
 
   stats.failures += 1;
+  chain.failures += 1;
+  addLog({
+    chainName: model.publicName,
+    originalModel: requestedModel,
+    failedModels,
+    finalModel: "",
+    status: "failed",
+    latency: Date.now() - startedAt,
+    error: errors.map((item) => `${item.target || "target"}: ${item.status || item.message}`).join(", ")
+  });
   sendError(res, 503, "All configured targets failed before a response could be returned", errors);
 }
 
