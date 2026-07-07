@@ -64,7 +64,9 @@ function ChainEditor({
   };
 
   const removeModel = (idx: number) => {
-    setModels(models.filter((_, i) => i !== idx));
+    setModels(models
+      .filter((_, i) => i !== idx)
+      .map((model, i) => ({ ...model, priority: i + 1 })));
   };
 
   const moveModel = (idx: number, dir: -1 | 1) => {
@@ -228,7 +230,7 @@ function ChainEditor({
                       'border rounded-lg p-3 transition-all',
                       model.enabled ? 'border-slate-200 bg-white' : 'border-slate-200 bg-slate-50 opacity-60'
                     )}>
-                      <div className="flex items-center justify-between mb-2">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-3">
                         <div className="flex items-center gap-2">
                           <span className={cn(
                             'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold',
@@ -243,35 +245,49 @@ function ChainEditor({
                             <span className="text-xs text-slate-400 ml-2">{provider?.name}</span>
                           </div>
                         </div>
-                        <div className="flex items-center gap-1">
+                        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                           <button
+                            type="button"
                             onClick={() => moveModel(idx, -1)}
                             disabled={idx === 0}
-                            className="p-1 text-slate-400 hover:text-slate-600 disabled:opacity-30 transition-colors"
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                            title="上移模型"
                           >
-                            <ArrowUp size={14} />
+                            <ArrowUp size={13} />
+                            上移
                           </button>
                           <button
+                            type="button"
                             onClick={() => moveModel(idx, 1)}
                             disabled={idx === models.length - 1}
-                            className="p-1 text-slate-400 hover:text-slate-600 disabled:opacity-30 transition-colors"
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                            title="下移模型"
                           >
-                            <ArrowDown size={14} />
+                            <ArrowDown size={13} />
+                            下移
                           </button>
                           <button
+                            type="button"
                             onClick={() => updateModel(idx, { enabled: !model.enabled })}
                             className={cn(
-                              'p-1 transition-colors',
-                              model.enabled ? 'text-emerald-500 hover:text-emerald-600' : 'text-slate-400 hover:text-slate-600'
+                              'inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium shadow-sm transition-colors',
+                              model.enabled
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : 'border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100'
                             )}
+                            title={model.enabled ? '点击禁用模型' : '点击启用模型'}
                           >
-                            {model.enabled ? <Power size={14} /> : <PowerOff size={14} />}
+                            {model.enabled ? <Power size={13} /> : <PowerOff size={13} />}
+                            {model.enabled ? '已启用' : '已禁用'}
                           </button>
                           <button
+                            type="button"
                             onClick={() => removeModel(idx)}
-                            className="p-1 text-slate-400 hover:text-red-500 transition-colors"
+                            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-600 shadow-sm transition-colors hover:bg-red-100"
+                            title="删除模型"
                           >
-                            <Trash2 size={14} />
+                            <Trash2 size={13} />
+                            删除
                           </button>
                         </div>
                       </div>
