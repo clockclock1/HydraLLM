@@ -37,6 +37,8 @@ const stats = {
 };
 
 const circuitBreakers = new Map();
+const roundRobinCursors = new Map();
+const validStrategies = new Set(["priority", "round-robin", "weighted", "latency-based"]);
 
 const defaultConfig = {
   adminToken: "admin",
@@ -146,9 +148,32 @@ function normalizeConfig(input) {
     : defaultConfig.failoverStatusCodes;
   cfg.requestTimeoutMs = Number(cfg.requestTimeoutMs || defaultConfig.requestTimeoutMs);
   cfg.circuitBreaker = normalizeCircuitBreaker(cfg.circuitBreaker);
-  cfg.models = Array.isArray(cfg.models) ? cfg.models : [];
+  cfg.models = Array.isArray(cfg.models) ? cfg.models.map(normalizeModelConfig) : [];
   cfg.modelSource = normalizeModelSource(cfg.modelSource);
   return cfg;
+}
+
+function normalizeModelConfig(model) {
+  const normalized = { ...(model || {}) };
+  normalized.publicName = String(normalized.publicName || "");
+  normalized.enabled = normalized.enabled !== false;
+  normalized.strategy = validStrategies.has(normalized.strategy) ? normalized.strategy : "priority";
+  normalized.targets = normalizeTargetQueue(normalized.targets);
+  return normalized;
+}
+
+function normalizeTargetQueue(targets) {
+  return (Array.isArray(targets) ? targets : [])
+    .map((target, index) => ({
+      ...(target || {}),
+      priority: Math.max(1, Math.floor(Number(target?.priority) || index + 1)),
+      weight: Math.max(1, Math.floor(Number(target?.weight) || 1)),
+      maxRetries: Math.max(0, Math.floor(Number(target?.maxRetries) || 0)),
+      timeoutMs: Math.max(1, Number(target?.timeoutMs || defaultConfig.requestTimeoutMs)),
+      enabled: target?.enabled !== false
+    }))
+    .sort((a, b) => a.priority - b.priority)
+    .map((target, index) => ({ ...target, priority: index + 1 }));
 }
 
 function normalizeCircuitBreaker(input) {
@@ -171,7 +196,7 @@ function normalizeModelSource(input) {
   source.exclude = String(source.exclude || "");
   source.publicPrefix = String(source.publicPrefix || "");
   source.publicSuffix = String(source.publicSuffix || "");
-  source.targets = Array.isArray(source.targets) ? source.targets : [];
+  source.targets = normalizeTargetQueue(source.targets);
   return source;
 }
 
@@ -260,19 +285,57 @@ async function findModel(cfg, publicName) {
 }
 
 function enabledTargets(model) {
-  const configured = (model.targets || []).filter((target) => target.enabled !== false && target.baseUrl && target.apiKey);
+  const configured = normalizeTargetQueue(model.targets).filter((target) => target.enabled !== false && target.baseUrl && target.apiKey);
   const available = configured.filter((target) => !isCircuitOpen(model, target));
-  if (!configured.length || available.length) return available;
+  if (!configured.length || available.length) return selectTargetQueue(model, available);
 
   resetModelCircuits(model);
-  return configured;
+  return selectTargetQueue(model, configured);
+}
+
+function selectTargetQueue(model, targets) {
+  const ordered = [...targets].sort((a, b) => a.priority - b.priority);
+  if (ordered.length <= 1) return ordered;
+
+  if (model.strategy === "round-robin") {
+    const key = model.publicName;
+    const cursor = roundRobinCursors.get(key) || 0;
+    roundRobinCursors.set(key, (cursor + 1) % ordered.length);
+    return rotateTargets(ordered, cursor % ordered.length);
+  }
+
+  if (model.strategy === "weighted") {
+    const totalWeight = ordered.reduce((sum, target) => sum + Math.max(1, Number(target.weight) || 1), 0);
+    let ticket = Math.random() * totalWeight;
+    const startIndex = ordered.findIndex((target) => {
+      ticket -= Math.max(1, Number(target.weight) || 1);
+      return ticket <= 0;
+    });
+    return rotateTargets(ordered, Math.max(0, startIndex));
+  }
+
+  if (model.strategy === "latency-based") {
+    return ordered.sort((a, b) => targetAverageLatency(model, a) - targetAverageLatency(model, b) || a.priority - b.priority);
+  }
+
+  return ordered;
+}
+
+function rotateTargets(targets, startIndex) {
+  return [...targets.slice(startIndex), ...targets.slice(0, startIndex)];
+}
+
+function targetAverageLatency(model, target) {
+  const key = targetKey(model, target);
+  const latency = Number(stats.targets[key]?.avgLatencyMs || 0);
+  return latency > 0 ? latency : Number.MAX_SAFE_INTEGER;
 }
 
 function targetKey(model, target) {
   return `${model.publicName}/${target.name || ""}/${target.modelName || ""}/${target.baseUrl || ""}`;
 }
 
-function recordTarget(model, target, ok, cfg, failure = {}) {
+function recordTarget(model, target, ok, cfg, failure = {}, latencyMs = 0) {
   const key = targetKey(model, target);
   const failureThreshold = cfg?.circuitBreaker?.failureThreshold || defaultConfig.circuitBreaker.failureThreshold;
   const cooldownMs = (cfg?.circuitBreaker?.cooldownMinutes || defaultConfig.circuitBreaker.cooldownMinutes) * 60 * 1000;
@@ -287,8 +350,17 @@ function recordTarget(model, target, ok, cfg, failure = {}) {
     consecutiveFailures: 0,
     disabledUntil: 0,
     lastStatus: 0,
-    lastError: ""
+    lastError: "",
+    lastLatencyMs: 0,
+    avgLatencyMs: 0
   };
+  const measuredLatency = Math.max(0, Math.round(Number(latencyMs) || 0));
+  if (measuredLatency > 0) {
+    stats.targets[key].lastLatencyMs = measuredLatency;
+    stats.targets[key].avgLatencyMs = stats.targets[key].avgLatencyMs
+      ? Math.round((stats.targets[key].avgLatencyMs * 0.8) + (measuredLatency * 0.2))
+      : measuredLatency;
+  }
   if (ok) {
     stats.targets[key].ok += 1;
     stats.targets[key].consecutiveFailures = 0;
@@ -308,8 +380,8 @@ function recordTarget(model, target, ok, cfg, failure = {}) {
   }
 }
 
-function recordTargetFailure(model, target, cfg, failure) {
-  recordTarget(model, target, false, cfg, failure);
+function recordTargetFailure(model, target, cfg, failure, latencyMs = 0) {
+  recordTarget(model, target, false, cfg, failure, latencyMs);
   const key = targetKey(model, target);
   if (stats.targets[key]) {
     stats.targets[key].lastStatus = Number(failure?.status || 0);
@@ -697,53 +769,36 @@ async function handleProxy(req, res, pathname, cfg) {
   let attempted = 0;
 
   for (const target of targets) {
-    attempted += 1;
-    let upstream;
-    try {
-      upstream = await callTarget(req, pathname, body, model, target, cfg);
-    } catch (err) {
-      const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
-      recordTargetFailure(model, target, cfg, failure);
-      errors.push({ target: target.name, message: failure.message });
-      failedModels.push(target.modelName || target.name || target.baseUrl);
-      continue;
-    }
+    const maxAttempts = 1 + Math.max(0, Math.floor(Number(target.maxRetries) || 0));
 
-    const responseType = upstream.headers.get("content-type") || (isStream ? "text/event-stream" : "application/json");
-    if (!upstream.ok) {
-      const text = await upstream.text().catch(() => "");
-      const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok) || {
-        status: upstream.status,
-        message: `Upstream returned ${upstream.status}`,
-        body: trimError(text)
-      };
-      recordTargetFailure(model, target, cfg, failure);
-      errors.push({ target: target.name, status: failure.status || upstream.status, body: failure.body || failure.message });
-      failedModels.push(target.modelName || target.name || target.baseUrl);
-      if (shouldTryNext(failure.status || upstream.status, cfg)) continue;
-      stats.failures += 1;
-      chain.failures += 1;
-      addLog({
-        chainName: model.publicName,
-        originalModel: requestedModel,
-        failedModels,
-        finalModel: "",
-        status: "failed",
-        latency: Date.now() - startedAt,
-        error: failure.message || `Upstream returned ${upstream.status}`
-      });
-      send(res, upstream.status, text || { error: { message: `Upstream returned ${upstream.status}` } }, { "content-type": responseType });
-      return;
-    }
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      attempted += 1;
+      const targetStartedAt = Date.now();
+      let upstream;
+      try {
+        upstream = await callTarget(req, pathname, body, model, target, cfg);
+      } catch (err) {
+        const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+        recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
+        errors.push({ target: target.name, attempt, message: failure.message });
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        failedModels.push(targetLabel(target));
+        break;
+      }
 
-    if (!isStream) {
-      const text = await upstream.text().catch(() => "");
-      const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
-      if (failure) {
-        recordTargetFailure(model, target, cfg, failure);
-        errors.push({ target: target.name, status: failure.status, body: failure.body || failure.message });
-        failedModels.push(target.modelName || target.name || target.baseUrl);
-        if (shouldTryNext(failure.status, cfg)) continue;
+      const responseType = upstream.headers.get("content-type") || (isStream ? "text/event-stream" : "application/json");
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => "");
+        const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok) || {
+          status: upstream.status,
+          message: `Upstream returned ${upstream.status}`,
+          body: trimError(text)
+        };
+        recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
+        errors.push({ target: target.name, attempt, status: failure.status || upstream.status, body: failure.body || failure.message });
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        failedModels.push(targetLabel(target));
+        if (shouldTryNext(failure.status || upstream.status, cfg)) break;
         stats.failures += 1;
         chain.failures += 1;
         addLog({
@@ -753,16 +808,67 @@ async function handleProxy(req, res, pathname, cfg) {
           finalModel: "",
           status: "failed",
           latency: Date.now() - startedAt,
-          error: failure.message
+          error: failure.message || `Upstream returned ${upstream.status}`
         });
-        send(res, failure.status || 502, text || { error: { message: failure.message } }, { "content-type": responseType });
+        send(res, upstream.status, text || { error: { message: `Upstream returned ${upstream.status}` } }, { "content-type": responseType });
         return;
       }
 
-      recordTarget(model, target, true, cfg);
+      if (!isStream) {
+        const text = await upstream.text().catch(() => "");
+        const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
+        if (failure) {
+          recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
+          errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
+          if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+          failedModels.push(targetLabel(target));
+          if (shouldTryNext(failure.status, cfg)) break;
+          stats.failures += 1;
+          chain.failures += 1;
+          addLog({
+            chainName: model.publicName,
+            originalModel: requestedModel,
+            failedModels,
+            finalModel: "",
+            status: "failed",
+            latency: Date.now() - startedAt,
+            error: failure.message
+          });
+          send(res, failure.status || 502, text || { error: { message: failure.message } }, { "content-type": responseType });
+          return;
+        }
+
+        recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
+        stats.successes += 1;
+        chain.successes += 1;
+        if (failedModels.length > 0) {
+          stats.failovers += 1;
+          chain.failovers += 1;
+        }
+        addLog({
+          chainName: model.publicName,
+          originalModel: requestedModel,
+          failedModels,
+          finalModel: targetLabel(target),
+          status: "success",
+          latency: Date.now() - startedAt,
+          error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
+        });
+
+        res.writeHead(upstream.status, withCors({
+          "content-type": responseType,
+          "cache-control": "no-cache",
+          "x-proxy-target": target.name || "",
+          "x-proxy-model": target.modelName || ""
+        }));
+        res.end(text);
+        return;
+      }
+
+      recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
       stats.successes += 1;
       chain.successes += 1;
-      if (attempted > 1) {
+      if (failedModels.length > 0) {
         stats.failovers += 1;
         chain.failovers += 1;
       }
@@ -770,65 +876,39 @@ async function handleProxy(req, res, pathname, cfg) {
         chainName: model.publicName,
         originalModel: requestedModel,
         failedModels,
-        finalModel: target.modelName || target.name || target.baseUrl,
+        finalModel: targetLabel(target),
         status: "success",
         latency: Date.now() - startedAt,
-        error: errors.length ? errors.map((item) => `${item.target || "target"}: ${item.status || item.message}`).join(", ") : ""
+        error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
       });
 
-      res.writeHead(upstream.status, withCors({
+      const headers = withCors({
         "content-type": responseType,
-        "cache-control": "no-cache",
+        "cache-control": isStream ? "no-cache, no-transform" : "no-cache",
         "x-proxy-target": target.name || "",
         "x-proxy-model": target.modelName || ""
-      }));
-      res.end(text);
-      return;
-    }
+      });
 
-    recordTarget(model, target, true, cfg);
-    stats.successes += 1;
-    chain.successes += 1;
-    if (attempted > 1) {
-      stats.failovers += 1;
-      chain.failovers += 1;
-    }
-    addLog({
-      chainName: model.publicName,
-      originalModel: requestedModel,
-      failedModels,
-      finalModel: target.modelName || target.name || target.baseUrl,
-      status: "success",
-      latency: Date.now() - startedAt,
-      error: errors.length ? errors.map((item) => `${item.target || "target"}: ${item.status || item.message}`).join(", ") : ""
-    });
+      res.writeHead(upstream.status, headers);
 
-    const headers = withCors({
-      "content-type": responseType,
-      "cache-control": isStream ? "no-cache, no-transform" : "no-cache",
-      "x-proxy-target": target.name || "",
-      "x-proxy-model": target.modelName || ""
-    });
-
-    res.writeHead(upstream.status, headers);
-
-    if (!upstream.body) {
-      res.end();
-      return;
-    }
-
-    try {
-      const reader = upstream.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
+      if (!upstream.body) {
+        res.end();
+        return;
       }
-      res.end();
-    } catch (err) {
-      res.destroy(err);
+
+      try {
+        const reader = upstream.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+        res.end();
+      } catch (err) {
+        res.destroy(err);
+      }
+      return;
     }
-    return;
   }
 
   stats.failures += 1;
@@ -840,9 +920,27 @@ async function handleProxy(req, res, pathname, cfg) {
     finalModel: "",
     status: "failed",
     latency: Date.now() - startedAt,
-    error: errors.map((item) => `${item.target || "target"}: ${item.status || item.message}`).join(", ")
+    error: errors.map(formatAttemptError).join(", ")
   });
   sendError(res, 503, "All configured targets failed before a response could be returned", errors);
+}
+
+function targetLabel(target) {
+  return target.modelName || target.name || target.baseUrl;
+}
+
+function formatAttemptError(item) {
+  const suffix = item.attempt ? `#${item.attempt}` : "";
+  return `${item.target || "target"}${suffix}: ${item.status || item.message}`;
+}
+
+function shouldRetryTarget(failure, cfg, attempt, maxAttempts) {
+  if (attempt >= maxAttempts) return false;
+  const status = Number(failure?.status || 0);
+  const immediateCooldownStatusCodes = cfg?.circuitBreaker?.immediateCooldownStatusCodes || defaultConfig.circuitBreaker.immediateCooldownStatusCodes;
+  if (immediateCooldownStatusCodes.includes(status)) return false;
+  if (!status) return true;
+  return status >= 500 || status === 408 || status === 409;
 }
 
 function trimError(text) {

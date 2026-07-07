@@ -10,11 +10,15 @@ interface BackendTarget {
   modelNameTemplate?: string;
   enabled?: boolean;
   timeoutMs?: number;
+  priority?: number;
+  weight?: number;
+  maxRetries?: number;
 }
 
 interface BackendModel {
   publicName: string;
   enabled?: boolean;
+  strategy?: FailoverChain['strategy'];
   targets?: BackendTarget[];
 }
 
@@ -131,6 +135,27 @@ const initialState: State = {
   circuitCooldownMinutes: 10,
 };
 
+function normalizeChainModels(models: FailoverChain['models']) {
+  return [...models]
+    .sort((a, b) => a.priority - b.priority)
+    .map((model, index) => ({
+      ...model,
+      priority: index + 1,
+      weight: Math.max(1, Math.floor(Number(model.weight) || 1)),
+      maxRetries: Math.max(0, Math.floor(Number(model.maxRetries) || 0)),
+      timeout: Math.max(1, Math.floor(Number(model.timeout) || 30)),
+      enabled: model.enabled !== false,
+    }));
+}
+
+function normalizeChain(chain: FailoverChain): FailoverChain {
+  return {
+    ...chain,
+    strategy: chain.strategy || 'priority',
+    models: normalizeChainModels(chain.models || []),
+  };
+}
+
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'SET_PAGE':
@@ -175,7 +200,7 @@ function reducer(state: State, action: Action): State {
         providers: state.providers.filter(p => p.id !== action.id),
         chains: state.chains.map(chain => ({
           ...chain,
-          models: chain.models.filter(model => model.providerId !== action.id),
+          models: normalizeChainModels(chain.models.filter(model => model.providerId !== action.id)),
         })),
       };
     case 'SET_PROVIDER_MODELS':
@@ -200,9 +225,9 @@ function reducer(state: State, action: Action): State {
         }),
       };
     case 'ADD_CHAIN':
-      return { ...state, chains: [...state.chains, action.chain] };
+      return { ...state, chains: [...state.chains, normalizeChain(action.chain)] };
     case 'UPDATE_CHAIN':
-      return { ...state, chains: state.chains.map(c => c.id === action.chain.id ? action.chain : c) };
+      return { ...state, chains: state.chains.map(c => c.id === action.chain.id ? normalizeChain(action.chain) : c) };
     case 'DELETE_CHAIN':
       return { ...state, chains: state.chains.filter(c => c.id !== action.id) };
     case 'ADD_LOG':
@@ -282,20 +307,20 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
       return {
         providerId,
         modelName,
-        priority: index + 1,
-        weight: Math.max(1, Math.floor(100 / Math.max(1, model.targets?.length || 1))),
-        maxRetries: 1,
+        priority: Math.max(1, Math.floor(Number(target.priority) || index + 1)),
+        weight: Math.max(1, Math.floor(Number(target.weight) || Math.floor(100 / Math.max(1, model.targets?.length || 1)))),
+        maxRetries: Math.max(0, Math.floor(Number(target.maxRetries) || 0)),
         timeout: Math.max(1, Math.round((target.timeoutMs || config.requestTimeoutMs || 30000) / 1000)),
         enabled: target.enabled !== false,
       };
-    });
+    }).sort((a, b) => a.priority - b.priority).map((item, index) => ({ ...item, priority: index + 1 }));
 
     return {
       id: uuidv4(),
       name: model.publicName,
       description: `代理模型 ${model.publicName}`,
       models,
-      strategy: 'priority',
+      strategy: model.strategy || 'priority',
       proxyModelName: model.publicName,
       proxyApiKey: firstProxyKey,
       enabled: model.enabled !== false,
@@ -337,9 +362,10 @@ function uiToBackend(state: State): BackendConfig {
   const models: BackendModel[] = state.chains.map((chain) => ({
     publicName: chain.proxyModelName,
     enabled: chain.enabled,
+    strategy: chain.strategy,
     targets: [...chain.models]
       .sort((a, b) => a.priority - b.priority)
-      .map((model) => {
+      .map((model, index) => {
         const provider = state.providers.find(item => item.id === model.providerId);
         return {
           name: provider?.name || model.modelName,
@@ -347,6 +373,9 @@ function uiToBackend(state: State): BackendConfig {
           apiKey: provider?.apiKey || '',
           modelName: model.modelName,
           enabled: model.enabled,
+          priority: index + 1,
+          weight: Math.max(1, Math.floor(Number(model.weight) || 1)),
+          maxRetries: Math.max(0, Math.floor(Number(model.maxRetries) || 0)),
           timeoutMs: Math.max(1, model.timeout || 30) * 1000,
         };
       })

@@ -33,6 +33,23 @@ const strategyLabels: Record<FailoverChain['strategy'], { label: string; desc: s
   'latency-based': { label: '最低延迟', desc: '优先使用延迟最低的模型', icon: <Gauge size={14} /> },
 };
 
+function normalizeQueue(items: FailoverModel[]) {
+  return [...items]
+    .sort((a, b) => a.priority - b.priority)
+    .map((model, index) => ({
+      ...model,
+      priority: index + 1,
+      timeout: Math.max(1, Number(model.timeout) || 30),
+      maxRetries: Math.max(0, Number(model.maxRetries) || 0),
+      weight: Math.max(1, Number(model.weight) || 1),
+      enabled: model.enabled !== false,
+    }));
+}
+
+function modelQueueKey(model: FailoverModel, index: number) {
+  return `${model.providerId}:${model.modelName}:${index}`;
+}
+
 function ChainEditor({
   chain,
   onSave,
@@ -48,42 +65,44 @@ function ChainEditor({
   const [strategy, setStrategy] = useState<FailoverChain['strategy']>(chain?.strategy || 'priority');
   const [proxyModelName, setProxyModelName] = useState(chain?.proxyModelName || '');
   const [proxyApiKey, setProxyApiKey] = useState(chain?.proxyApiKey || 'fpk-' + uuidv4().slice(0, 24));
-  const [models, setModels] = useState<FailoverModel[]>(chain?.models || []);
+  const [models, setModels] = useState<FailoverModel[]>(() => normalizeQueue(chain?.models || []));
 
   const addModel = (providerId: string, modelName: string) => {
     if (models.find(m => m.providerId === providerId && m.modelName === modelName)) return;
-    setModels([...models, {
+    setModels(current => normalizeQueue([...current, {
       providerId,
       modelName,
-      priority: models.length + 1,
-      weight: Math.floor(100 / (models.length + 1)),
+      priority: current.length + 1,
+      weight: Math.max(1, Math.floor(100 / (current.length + 1))),
       maxRetries: 2,
       timeout: 30,
       enabled: true,
-    }]);
+    }]));
   };
 
   const removeModel = (idx: number) => {
-    setModels(models
+    setModels(current => normalizeQueue(current)
       .filter((_, i) => i !== idx)
       .map((model, i) => ({ ...model, priority: i + 1 })));
   };
 
   const moveModel = (idx: number, dir: -1 | 1) => {
-    const next = [...models];
-    const target = idx + dir;
-    if (target < 0 || target >= next.length) return;
-    [next[idx], next[target]] = [next[target], next[idx]];
-    next.forEach((m, i) => m.priority = i + 1);
-    setModels(next);
+    setModels(current => {
+      const next = normalizeQueue(current);
+      const target = idx + dir;
+      if (target < 0 || target >= next.length) return next;
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return normalizeQueue(next);
+    });
   };
 
   const updateModel = (idx: number, updates: Partial<FailoverModel>) => {
-    setModels(models.map((m, i) => i === idx ? { ...m, ...updates } : m));
+    setModels(current => normalizeQueue(current).map((m, i) => i === idx ? { ...m, ...updates } : m));
   };
 
   const handleSave = () => {
-    if (!name || !proxyModelName || models.length === 0) return;
+    const nextModels = normalizeQueue(models);
+    if (!name || !proxyModelName || nextModels.length === 0) return;
     onSave({
       id: chain?.id || uuidv4(),
       name,
@@ -91,7 +110,7 @@ function ChainEditor({
       strategy,
       proxyModelName,
       proxyApiKey,
-      models,
+      models: nextModels,
       enabled: chain?.enabled ?? true,
       createdAt: chain?.createdAt || Date.now(),
       totalRequests: chain?.totalRequests || 0,
@@ -100,9 +119,11 @@ function ChainEditor({
     });
   };
 
+  const orderedModels = normalizeQueue(models);
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl w-full max-w-5xl shadow-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
           <h3 className="font-semibold text-slate-800">{chain ? '编辑故障转移链' : '创建故障转移链'}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
@@ -193,7 +214,7 @@ function ChainEditor({
                   <p className="text-xs text-slate-500 mb-1 font-medium">{provider.name}</p>
                   <div className="flex flex-wrap gap-1.5">
                     {provider.models.map(model => {
-                      const isAdded = models.some(m => m.providerId === provider.id && m.modelName === model);
+                      const isAdded = orderedModels.some(m => m.providerId === provider.id && m.modelName === model);
                       return (
                         <button
                           key={model}
@@ -217,35 +238,35 @@ function ChainEditor({
           </div>
 
           {/* Model Chain */}
-          {models.length > 0 && (
+          {orderedModels.length > 0 && (
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">
-                转移链配置 ({models.length} 个模型)
+                转移链配置 ({orderedModels.length} 个模型)
               </label>
               <div className="space-y-2">
-                {models.map((model, idx) => {
+                {orderedModels.map((model, idx) => {
                   const provider = state.providers.find(p => p.id === model.providerId);
                   return (
-                    <div key={idx} className={cn(
+                    <div key={modelQueueKey(model, idx)} className={cn(
                       'border rounded-lg p-3 transition-all',
                       model.enabled ? 'border-slate-200 bg-white' : 'border-slate-200 bg-slate-50 opacity-60'
                     )}>
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-3">
-                        <div className="flex items-center gap-2">
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start mb-3">
+                        <div className="flex min-w-0 items-center gap-2">
                           <span className={cn(
-                            'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold',
+                            'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
                             idx === 0 ? 'bg-blue-100 text-blue-600' :
                             idx === 1 ? 'bg-amber-100 text-amber-600' :
                             'bg-slate-100 text-slate-500'
                           )}>
                             {idx + 1}
                           </span>
-                          <div>
-                            <span className="text-sm font-mono font-medium text-slate-700">{model.modelName}</span>
+                          <div className="min-w-0">
+                            <span className="block truncate break-all text-sm font-mono font-medium text-slate-700">{model.modelName}</span>
                             <span className="text-xs text-slate-400 ml-2">{provider?.name}</span>
                           </div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                           <button
                             type="button"
                             onClick={() => moveModel(idx, -1)}
@@ -259,7 +280,7 @@ function ChainEditor({
                           <button
                             type="button"
                             onClick={() => moveModel(idx, 1)}
-                            disabled={idx === models.length - 1}
+                            disabled={idx === orderedModels.length - 1}
                             className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
                             title="下移模型"
                           >
@@ -293,7 +314,7 @@ function ChainEditor({
                       </div>
 
                       {/* Model settings */}
-                      <div className="grid grid-cols-3 gap-3 mt-2">
+                      <div className="grid grid-cols-1 gap-3 mt-2 md:grid-cols-3">
                         <div>
                           <label className="text-[10px] text-slate-400 flex items-center gap-1 mb-0.5">
                             <Timer size={10} /> 超时(秒)
@@ -342,7 +363,7 @@ function ChainEditor({
           </button>
           <button
             onClick={handleSave}
-            disabled={!name || !proxyModelName || models.length === 0}
+            disabled={!name || !proxyModelName || orderedModels.length === 0}
             className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             保存
