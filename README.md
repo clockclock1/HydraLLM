@@ -89,6 +89,29 @@ Pull:
 docker pull ghcr.io/clockclock1/hydrallm:latest
 ```
 
+## Orchestrated Deployment
+
+Deployment manifests are in `deploy/` and use the prebuilt Docker image from GHCR.
+
+Docker Compose:
+
+```bash
+cd deploy/compose
+cp .env.example .env
+# set HYDRALLM_VERSION=v0.1.0 after publishing a Release
+docker compose up -d
+```
+
+Kubernetes:
+
+```bash
+cd deploy/kubernetes
+kustomize edit set image ghcr.io/clockclock1/hydrallm=ghcr.io/clockclock1/hydrallm:v0.1.0
+kubectl apply -k .
+```
+
+See `deploy/README.md` for details.
+
 ## Configuration Model
 
 Each public model maps to ordered targets:

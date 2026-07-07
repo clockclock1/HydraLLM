@@ -1,0 +1,27 @@
+services:
+  hydrallm:
+    image: ${HYDRALLM_IMAGE:-ghcr.io/clockclock1/hydrallm}:${HYDRALLM_VERSION:-latest}
+    container_name: hydrallm
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATA_DIR: /app/data
+    ports:
+      - "${HYDRALLM_PORT:-8787}:8787"
+    volumes:
+      - hydrallm-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  hydrallm-data:
+    name: ${HYDRALLM_DATA_VOLUME:-hydrallm-data}

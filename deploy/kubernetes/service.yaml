@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hydrallm
+  namespace: hydrallm
+  labels:
+    app.kubernetes.io/name: hydrallm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: hydrallm
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
