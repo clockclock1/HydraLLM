@@ -295,7 +295,7 @@ function FetchModelsModal({
 }
 
 export default function Providers() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, refreshProviderHealth } = useStore();
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingProvider, setEditingProvider] = useState<Provider | undefined>();
   const [fetchingProvider, setFetchingProvider] = useState<Provider | undefined>();
@@ -317,15 +317,11 @@ export default function Providers() {
 
   const handleCheckHealth = async (id: string) => {
     setCheckingId(id);
-    await new Promise(r => setTimeout(r, 1200));
-    const isOnline = Math.random() > 0.3;
-    dispatch({
-      type: 'SET_PROVIDER_STATUS',
-      id,
-      status: isOnline ? 'online' : 'offline',
-      latency: isOnline ? Math.floor(100 + Math.random() * 400) : undefined,
-    });
-    setCheckingId(null);
+    try {
+      await refreshProviderHealth();
+    } finally {
+      setCheckingId(null);
+    }
   };
 
   return (

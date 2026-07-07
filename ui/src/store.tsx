@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useReducer, type ReactNode } from 'react';
+import React, { createContext, useContext, useCallback, useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { Provider, FailoverChain, Page, LogEntry } from './types';
 
@@ -23,6 +23,10 @@ interface BackendConfig {
   proxyKeys: { name?: string; key: string; enabled?: boolean }[];
   failoverStatusCodes: number[];
   requestTimeoutMs: number;
+  circuitBreaker?: {
+    failureThreshold?: number;
+    cooldownMinutes?: number;
+  };
   modelSource?: unknown;
   models: BackendModel[];
 }
@@ -63,12 +67,15 @@ interface State {
   saveError: string;
   backendConfig: BackendConfig | null;
   backendStats: BackendStats | null;
+  circuitFailureThreshold: number;
+  circuitCooldownMinutes: number;
 }
 
 type Action =
   | { type: 'SET_PAGE'; page: Page }
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_ADMIN_TOKEN'; token: string }
+  | { type: 'SET_CIRCUIT_SETTINGS'; failureThreshold: number; cooldownMinutes: number }
   | { type: 'SET_SAVE_STATUS'; status: State['saveStatus']; error?: string }
   | { type: 'LOAD_BACKEND_STATE'; config: BackendConfig; stats?: BackendStats | null }
   | { type: 'LOAD_BACKEND_STATS'; stats: BackendStats }
@@ -77,6 +84,7 @@ type Action =
   | { type: 'DELETE_PROVIDER'; id: string }
   | { type: 'SET_PROVIDER_MODELS'; id: string; models: string[] }
   | { type: 'SET_PROVIDER_STATUS'; id: string; status: Provider['status']; latency?: number }
+  | { type: 'SET_PROVIDER_HEALTHS'; providers: Array<{ id?: string; name?: string; baseUrl: string; status: Provider['status']; latency?: number; models?: string[] }> }
   | { type: 'ADD_CHAIN'; chain: FailoverChain }
   | { type: 'UPDATE_CHAIN'; chain: FailoverChain }
   | { type: 'DELETE_CHAIN'; id: string }
@@ -87,6 +95,10 @@ const defaultConfig: BackendConfig = {
   proxyKeys: [{ name: 'test-key', key: 'sk-local-test', enabled: true }],
   failoverStatusCodes: [401, 403, 408, 409, 429, 500, 502, 503, 504],
   requestTimeoutMs: 120000,
+  circuitBreaker: {
+    failureThreshold: 3,
+    cooldownMinutes: 10,
+  },
   modelSource: {
     enabled: false,
     url: '',
@@ -113,6 +125,8 @@ const initialState: State = {
   saveError: '',
   backendConfig: null,
   backendStats: null,
+  circuitFailureThreshold: 3,
+  circuitCooldownMinutes: 10,
 };
 
 function reducer(state: State, action: Action): State {
@@ -124,15 +138,24 @@ function reducer(state: State, action: Action): State {
     case 'SET_ADMIN_TOKEN':
       localStorage.setItem('adminToken', action.token);
       return { ...state, adminToken: action.token };
+    case 'SET_CIRCUIT_SETTINGS':
+      return {
+        ...state,
+        circuitFailureThreshold: Math.max(1, Math.floor(Number(action.failureThreshold) || 3)),
+        circuitCooldownMinutes: Math.max(1, Math.floor(Number(action.cooldownMinutes) || 10)),
+      };
     case 'SET_SAVE_STATUS':
       return { ...state, saveStatus: action.status, saveError: action.error || '' };
     case 'LOAD_BACKEND_STATE': {
       const mapped = backendToUi(action.config, action.stats || null);
+      const circuitBreaker = action.config.circuitBreaker || defaultConfig.circuitBreaker;
       return {
         ...state,
         ...mapped,
         backendConfig: action.config,
         backendStats: action.stats || null,
+        circuitFailureThreshold: Math.max(1, Number(circuitBreaker?.failureThreshold || 3)),
+        circuitCooldownMinutes: Math.max(1, Number(circuitBreaker?.cooldownMinutes || 10)),
         configLoaded: true,
         saveStatus: 'idle',
         saveError: '',
@@ -157,6 +180,24 @@ function reducer(state: State, action: Action): State {
       return { ...state, providers: state.providers.map(p => p.id === action.id ? { ...p, models: action.models } : p) };
     case 'SET_PROVIDER_STATUS':
       return { ...state, providers: state.providers.map(p => p.id === action.id ? { ...p, status: action.status, latency: action.latency, lastCheck: Date.now() } : p) };
+    case 'SET_PROVIDER_HEALTHS':
+      return {
+        ...state,
+        providers: state.providers.map((provider) => {
+          const health = action.providers.find((item) =>
+            (item.id && item.id === provider.id) ||
+            (item.baseUrl === provider.baseUrl && (!item.name || item.name === provider.name))
+          );
+          if (!health) return provider;
+          return {
+            ...provider,
+            status: health.status,
+            latency: health.latency,
+            lastCheck: Date.now(),
+            models: health.models?.length ? health.models : provider.models,
+          };
+        }),
+      };
     case 'ADD_CHAIN':
       return { ...state, chains: [...state.chains, action.chain] };
     case 'UPDATE_CHAIN':
@@ -295,7 +336,7 @@ function uiToBackend(state: State): BackendConfig {
   const models: BackendModel[] = state.chains.map((chain) => ({
     publicName: chain.proxyModelName,
     enabled: chain.enabled,
-    targets: chain.models
+    targets: [...chain.models]
       .sort((a, b) => a.priority - b.priority)
       .map((model) => {
         const provider = state.providers.find(item => item.id === model.providerId);
@@ -315,6 +356,10 @@ function uiToBackend(state: State): BackendConfig {
     ...base,
     adminToken: state.adminToken || base.adminToken || 'admin',
     proxyKeys: proxyKeys.length ? proxyKeys : base.proxyKeys,
+    circuitBreaker: {
+      failureThreshold: Math.max(1, Math.floor(Number(state.circuitFailureThreshold) || 3)),
+      cooldownMinutes: Math.max(1, Math.floor(Number(state.circuitCooldownMinutes) || 10)),
+    },
     models,
   };
 }
@@ -338,12 +383,13 @@ const StoreContext = createContext<{
   loadConfig: (tokenOverride?: string) => Promise<void>;
   saveConfig: (tokenOverride?: string) => Promise<void>;
   fetchProviderModels: (url: string, apiKey: string) => Promise<string[]>;
+  refreshProviderHealth: () => Promise<void>;
 } | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  const loadConfig = async (tokenOverride?: string) => {
+  const loadConfig = useCallback(async (tokenOverride?: string) => {
     const token = tokenOverride || state.adminToken;
     dispatch({ type: 'SET_SAVE_STATUS', status: 'loading' });
     const res = await fetch('/api/config', {
@@ -359,9 +405,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       headers: { 'x-admin-token': token },
     }).then((statsRes) => statsRes.ok ? statsRes.json() : null).catch(() => null);
     dispatch({ type: 'LOAD_BACKEND_STATE', config, stats });
-  };
+  }, [state.adminToken]);
 
-  const saveConfig = async (tokenOverride?: string) => {
+  const saveConfig = useCallback(async (tokenOverride?: string) => {
     const token = tokenOverride || state.adminToken;
     dispatch({ type: 'SET_SAVE_STATUS', status: 'saving' });
     const nextConfig = uiToBackend({ ...state, adminToken: token });
@@ -384,9 +430,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }).then((statsRes) => statsRes.ok ? statsRes.json() : null).catch(() => null);
     dispatch({ type: 'LOAD_BACKEND_STATE', config: body.config, stats });
     dispatch({ type: 'SET_SAVE_STATUS', status: 'saved' });
-  };
+  }, [state]);
 
-  const fetchProviderModels = async (url: string, apiKey: string) => {
+  const fetchProviderModels = useCallback(async (url: string, apiKey: string) => {
     const res = await fetch('/api/model-source/preview', {
       method: 'POST',
       headers: {
@@ -398,11 +444,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!res.ok) throw new Error(await readJsonError(res));
     const body = await res.json();
     return body.models || [];
-  };
+  }, [state.adminToken]);
+
+  const providerHealthSignature = useMemo(
+    () => state.providers.map((provider) => `${provider.id}:${provider.name}:${provider.baseUrl}:${provider.apiKey}`).join('|'),
+    [state.providers]
+  );
+
+  const providerHealthRequest = useMemo(
+    () => state.providers.map((provider) => ({
+      id: provider.id,
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+    })),
+    [providerHealthSignature]
+  );
+
+  const refreshProviderHealth = useCallback(async () => {
+    if (!state.configLoaded || !providerHealthRequest.length) return;
+    const res = await fetch('/api/providers/health', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-admin-token': state.adminToken,
+      },
+      body: JSON.stringify({ providers: providerHealthRequest }),
+    });
+    if (!res.ok) throw new Error(await readJsonError(res));
+    const body = await res.json();
+    dispatch({ type: 'SET_PROVIDER_HEALTHS', providers: body.providers || [] });
+  }, [state.adminToken, state.configLoaded, providerHealthRequest]);
 
   useEffect(() => {
     loadConfig().catch(() => undefined);
-  }, []);
+  }, [loadConfig]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -417,8 +493,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer);
   }, [state.configLoaded, state.adminToken]);
 
+  useEffect(() => {
+    if (!state.configLoaded || !state.providers.length) return;
+    refreshProviderHealth().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      refreshProviderHealth().catch(() => undefined);
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [state.configLoaded, providerHealthSignature, refreshProviderHealth]);
+
   return (
-    <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels }}>
+    <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels, refreshProviderHealth }}>
       {children}
     </StoreContext.Provider>
   );

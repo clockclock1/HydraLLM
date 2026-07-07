@@ -37,8 +37,6 @@ const stats = {
 };
 
 const circuitBreakers = new Map();
-const circuitFailureThreshold = Number(process.env.CIRCUIT_FAILURE_THRESHOLD || 3);
-const circuitCooldownMs = Number(process.env.CIRCUIT_COOLDOWN_MS || 10 * 60 * 1000);
 
 const defaultConfig = {
   adminToken: "admin",
@@ -51,6 +49,10 @@ const defaultConfig = {
   ],
   failoverStatusCodes: [401, 403, 408, 409, 429, 500, 502, 503, 504],
   requestTimeoutMs: 120000,
+  circuitBreaker: {
+    failureThreshold: 3,
+    cooldownMinutes: 10
+  },
   modelSource: {
     enabled: false,
     url: "",
@@ -142,9 +144,17 @@ function normalizeConfig(input) {
     ? cfg.failoverStatusCodes.map(Number)
     : defaultConfig.failoverStatusCodes;
   cfg.requestTimeoutMs = Number(cfg.requestTimeoutMs || defaultConfig.requestTimeoutMs);
+  cfg.circuitBreaker = normalizeCircuitBreaker(cfg.circuitBreaker);
   cfg.models = Array.isArray(cfg.models) ? cfg.models : [];
   cfg.modelSource = normalizeModelSource(cfg.modelSource);
   return cfg;
+}
+
+function normalizeCircuitBreaker(input) {
+  const breaker = { ...defaultConfig.circuitBreaker, ...(input || {}) };
+  breaker.failureThreshold = Math.max(1, Number(breaker.failureThreshold || defaultConfig.circuitBreaker.failureThreshold));
+  breaker.cooldownMinutes = Math.max(1, Number(breaker.cooldownMinutes || defaultConfig.circuitBreaker.cooldownMinutes));
+  return breaker;
 }
 
 function normalizeModelSource(input) {
@@ -258,8 +268,10 @@ function targetKey(model, target) {
   return `${model.publicName}/${target.name || ""}/${target.modelName || ""}/${target.baseUrl || ""}`;
 }
 
-function recordTarget(model, target, ok) {
+function recordTarget(model, target, ok, cfg) {
   const key = targetKey(model, target);
+  const failureThreshold = cfg?.circuitBreaker?.failureThreshold || defaultConfig.circuitBreaker.failureThreshold;
+  const cooldownMs = (cfg?.circuitBreaker?.cooldownMinutes || defaultConfig.circuitBreaker.cooldownMinutes) * 60 * 1000;
   stats.targets[key] ||= {
     model: model.publicName,
     target: target.name || target.modelName || target.baseUrl,
@@ -278,8 +290,8 @@ function recordTarget(model, target, ok) {
     stats.targets[key].error += 1;
     const breaker = circuitBreakers.get(key) || { failures: 0, disabledUntil: 0 };
     breaker.failures += 1;
-    if (breaker.failures >= circuitFailureThreshold) {
-      breaker.disabledUntil = Date.now() + circuitCooldownMs;
+    if (breaker.failures >= failureThreshold) {
+      breaker.disabledUntil = Date.now() + cooldownMs;
     }
     circuitBreakers.set(key, breaker);
     stats.targets[key].consecutiveFailures = breaker.failures;
@@ -415,6 +427,66 @@ async function fetchModelSource(source) {
   }
 }
 
+async function checkProviderHealth(provider) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(provider.timeoutMs || 10000));
+  const baseUrl = String(provider.baseUrl || "").replace(/\/+$/, "");
+  const headers = { accept: "application/json" };
+  if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+
+  try {
+    if (!baseUrl) throw new Error("missing baseUrl");
+    const res = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${trimError(text)}`);
+    const models = extractSourceModels(JSON.parse(text)).map((item) => item.id);
+    return {
+      id: provider.id,
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      status: "online",
+      latency: Date.now() - startedAt,
+      models,
+      error: ""
+    };
+  } catch (err) {
+    return {
+      id: provider.id,
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      status: "offline",
+      latency: Date.now() - startedAt,
+      models: [],
+      error: err.name === "AbortError" ? "timeout" : err.message
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function configuredProviders(cfg) {
+  const targets = [
+    ...(cfg.models || []).flatMap((model) => model.targets || []),
+    ...((cfg.modelSource && cfg.modelSource.targets) || [])
+  ];
+  const seen = new Set();
+  return targets
+    .filter((target) => target.baseUrl)
+    .map((target) => ({
+      id: `${target.name || ""}|${target.baseUrl || ""}|${target.apiKey || ""}`,
+      name: target.name || target.baseUrl,
+      baseUrl: target.baseUrl,
+      apiKey: target.apiKey || ""
+    }))
+    .filter((provider) => {
+      const key = `${provider.name}|${provider.baseUrl}|${provider.apiKey}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 function extractSourceModels(payload) {
   const sourceList = Array.isArray(payload)
     ? payload
@@ -544,7 +616,7 @@ async function handleProxy(req, res, pathname, cfg) {
     try {
       upstream = await callTarget(req, pathname, body, model, target, cfg);
     } catch (err) {
-      recordTarget(model, target, false);
+      recordTarget(model, target, false, cfg);
       errors.push({ target: target.name, message: err.name === "AbortError" ? "timeout" : err.message });
       failedModels.push(target.modelName || target.name || target.baseUrl);
       continue;
@@ -553,7 +625,7 @@ async function handleProxy(req, res, pathname, cfg) {
     const responseType = upstream.headers.get("content-type") || (isStream ? "text/event-stream" : "application/json");
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => "");
-      recordTarget(model, target, false);
+      recordTarget(model, target, false, cfg);
       errors.push({ target: target.name, status: upstream.status, body: trimError(text) });
       failedModels.push(target.modelName || target.name || target.baseUrl);
       if (shouldTryNext(upstream.status, cfg)) continue;
@@ -572,7 +644,7 @@ async function handleProxy(req, res, pathname, cfg) {
       return;
     }
 
-    recordTarget(model, target, true);
+    recordTarget(model, target, true, cfg);
     stats.successes += 1;
     chain.successes += 1;
     if (attempted > 1) {
@@ -659,6 +731,18 @@ async function handleAdminApi(req, res, pathname, cfg) {
 
   if (req.method === "GET" && pathname === "/api/stats") {
     send(res, 200, stats);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/providers/health") {
+    try {
+      const body = await readJson(req);
+      const providers = Array.isArray(body.providers) ? body.providers : configuredProviders(cfg);
+      const results = await Promise.all(providers.map((provider) => checkProviderHealth(provider)));
+      send(res, 200, { ok: true, providers: results });
+    } catch (err) {
+      sendError(res, 400, err.message || "Cannot check provider health");
+    }
     return;
   }
 
