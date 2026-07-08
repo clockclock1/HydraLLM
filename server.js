@@ -151,6 +151,7 @@ function normalizeConfig(input) {
   cfg.circuitBreaker = normalizeCircuitBreaker(cfg.circuitBreaker);
   cfg.models = Array.isArray(cfg.models) ? cfg.models.map(normalizeModelConfig) : [];
   cfg.modelSource = normalizeModelSource(cfg.modelSource);
+  cfg.providers = normalizeProviders(cfg.providers);
   return cfg;
 }
 
@@ -175,6 +176,22 @@ function normalizeTargetQueue(targets) {
     }))
     .sort((a, b) => a.priority - b.priority)
     .map((target, index) => ({ ...target, priority: index + 1 }));
+}
+
+function normalizeProviders(providers) {
+  return (Array.isArray(providers) ? providers : [])
+    .map((provider) => ({
+      id: String(provider?.id || ""),
+      name: String(provider?.name || ""),
+      baseUrl: String(provider?.baseUrl || "").replace(/\/+$/, ""),
+      apiKey: String(provider?.apiKey || ""),
+      models: uniqueStrings(provider?.models || [])
+    }))
+    .filter((provider) => provider.baseUrl);
+}
+
+function uniqueStrings(items) {
+  return [...new Set((Array.isArray(items) ? items : []).map(String).filter(Boolean))];
 }
 
 function normalizeCircuitBreaker(input) {

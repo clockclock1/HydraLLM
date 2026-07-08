@@ -22,6 +22,14 @@ interface BackendModel {
   targets?: BackendTarget[];
 }
 
+interface BackendProvider {
+  id?: string;
+  name?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  models?: string[];
+}
+
 interface BackendConfig {
   adminToken: string;
   proxyKeys: { name?: string; key: string; enabled?: boolean }[];
@@ -33,6 +41,7 @@ interface BackendConfig {
     immediateCooldownStatusCodes?: number[];
   };
   modelSource?: unknown;
+  providers?: BackendProvider[];
   models: BackendModel[];
 }
 
@@ -119,6 +128,7 @@ const defaultConfig: BackendConfig = {
     publicSuffix: '',
     targets: [],
   },
+  providers: [],
   models: [],
 };
 
@@ -294,14 +304,27 @@ function applyStatsToState(state: State, stats: BackendStats): State {
 }
 
 function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<State, 'providers' | 'chains' | 'logs'> {
-  const providers: Provider[] = [];
+  const providers: Provider[] = (config.providers || [])
+    .filter((provider) => provider?.baseUrl)
+    .map((provider) => ({
+      id: provider.id || uuidv4(),
+      name: provider.name || providerNameFromUrl(provider.baseUrl || ''),
+      baseUrl: provider.baseUrl || '',
+      apiKey: provider.apiKey || '',
+      models: uniqueStrings(provider.models || []),
+      status: 'unknown',
+    }));
   const providerKeyToId = new Map<string, string>();
   const firstProxyKey = config.proxyKeys.find(key => key.enabled !== false)?.key || 'sk-local-test';
+
+  providers.forEach((provider) => {
+    providerKeyToId.set(providerKey(provider.baseUrl, provider.apiKey, provider.name), provider.id);
+  });
 
   function ensureProvider(target: BackendTarget): string {
     const baseUrl = target.baseUrl || '';
     const apiKey = target.apiKey || '';
-    const key = `${baseUrl}||${apiKey}||${target.name || ''}`;
+    const key = providerKey(baseUrl, apiKey, target.name || '');
     const existing = providerKeyToId.get(key);
     if (existing) return existing;
 
@@ -372,6 +395,14 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
   return { providers, chains, logs };
 }
 
+function providerKey(baseUrl: string, apiKey: string, name: string) {
+  return `${baseUrl || ''}||${apiKey || ''}||${name || ''}`;
+}
+
+function uniqueStrings(items: string[]) {
+  return [...new Set(items.map(String).filter(Boolean))];
+}
+
 function targetSettingsFromConfig(config: BackendConfig) {
   const firstTarget = (config.models || []).flatMap(model => model.targets || [])[0];
   return {
@@ -416,6 +447,14 @@ function uiToBackend(state: State): BackendConfig {
       .filter(target => target.baseUrl && target.apiKey && target.modelName),
   }));
 
+  const providers: BackendProvider[] = state.providers.map((provider) => ({
+    id: provider.id,
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    models: uniqueStrings(provider.models || []),
+  }));
+
   return {
     ...base,
     adminToken: state.adminToken || base.adminToken || 'admin',
@@ -425,6 +464,7 @@ function uiToBackend(state: State): BackendConfig {
       cooldownMinutes: Math.max(1, Math.floor(Number(state.circuitCooldownMinutes) || 10)),
       immediateCooldownStatusCodes: base.circuitBreaker?.immediateCooldownStatusCodes || [429],
     },
+    providers,
     models,
   };
 }
