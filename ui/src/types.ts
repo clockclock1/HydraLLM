@@ -34,7 +34,7 @@ export interface FailoverChain {
   successRate: number;
 }
 
-export type Page = 'dashboard' | 'providers' | 'chains' | 'endpoints' | 'logs' | 'settings';
+export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'endpoints' | 'logs' | 'settings';
 
 export interface LogEntry {
   id: string;
@@ -46,4 +46,40 @@ export interface LogEntry {
   status: 'success' | 'failed';
   latency: number;
   error?: string;
+}
+
+export type ModelCapability = 'text' | 'vision' | 'tool';
+export type ModelTestStatus = 'passed' | 'failed' | 'uncertain' | 'skipped';
+
+export interface ModelTestTarget {
+  id: string;
+  providerId: string;
+  providerName: string;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+}
+
+export interface ModelCapabilityResult {
+  capability: ModelCapability;
+  status: ModelTestStatus;
+  latencyMs?: number;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+  detail: string;
+  evidence?: string;
+}
+
+export interface ModelTestResult {
+  id: string;
+  providerId: string;
+  providerName: string;
+  baseUrl: string;
+  modelName: string;
+  startedAt: number;
+  latencyMs: number;
+  results: ModelCapabilityResult[];
 }

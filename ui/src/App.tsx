@@ -2,6 +2,7 @@ import { StoreProvider, useStore } from './store';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import Providers from './components/Providers';
+import ModelTests from './components/ModelTests';
 import FailoverChains from './components/FailoverChains';
 import ProxyEndpoints from './components/ProxyEndpoints';
 import Logs from './components/Logs';
@@ -13,6 +14,7 @@ function PageContent() {
   const pages = {
     dashboard: <Dashboard />,
     providers: <Providers />,
+    'model-tests': <ModelTests />,
     chains: <FailoverChains />,
     endpoints: <ProxyEndpoints />,
     logs: <Logs />,

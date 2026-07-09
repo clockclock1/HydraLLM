@@ -716,6 +716,370 @@ async function checkProviderHealth(provider) {
   }
 }
 
+function normalizeTestCapabilities(items) {
+  const allowed = new Set(["text", "vision", "tool"]);
+  const requested = Array.isArray(items) ? items.map(String).filter((item) => allowed.has(item)) : [];
+  return requested.length ? [...new Set(requested)] : ["text", "vision", "tool"];
+}
+
+function normalizeTestTargets(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((target) => ({
+      id: String(target?.id || ""),
+      providerId: String(target?.providerId || ""),
+      providerName: String(target?.providerName || target?.name || ""),
+      baseUrl: String(target?.baseUrl || "").replace(/\/+$/, ""),
+      apiKey: String(target?.apiKey || ""),
+      modelName: String(target?.modelName || "")
+    }))
+    .filter((target) => target.baseUrl && target.modelName);
+}
+
+async function handleModelTests(req, res) {
+  try {
+    const body = await readJson(req);
+    const targets = normalizeTestTargets(body.targets).slice(0, 50);
+    const capabilities = normalizeTestCapabilities(body.capabilities);
+    if (!targets.length) {
+      sendError(res, 400, "No testable models were provided");
+      return;
+    }
+
+    const results = await runWithConcurrency(targets, 3, (target) => testModelCapabilities(target, capabilities));
+    send(res, 200, { ok: true, results });
+  } catch (err) {
+    sendError(res, 400, err.message || "Cannot run model tests");
+  }
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function testModelCapabilities(target, capabilities) {
+  const startedAt = Date.now();
+  const results = [];
+  for (const capability of capabilities) {
+    results.push(await runCapabilityTest(target, capability));
+  }
+  return {
+    id: target.id || `${target.providerId}:${target.modelName}`,
+    providerId: target.providerId,
+    providerName: target.providerName || target.baseUrl,
+    baseUrl: target.baseUrl,
+    modelName: target.modelName,
+    startedAt,
+    latencyMs: Date.now() - startedAt,
+    results
+  };
+}
+
+async function runCapabilityTest(target, capability) {
+  if (capability === "text") return testTextCompletion(target);
+  if (capability === "vision") return testVision(target);
+  if (capability === "tool") return testToolCalling(target);
+  return {
+    capability,
+    status: "skipped",
+    detail: "Unknown capability"
+  };
+}
+
+async function callTestChat(target, body, timeoutMs = 45000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = {
+    "content-type": "application/json",
+    "authorization": `Bearer ${target.apiKey}`
+  };
+
+  try {
+    const res = await fetch(`${target.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...body, model: target.modelName }),
+      signal: controller.signal
+    });
+    const text = await res.text();
+    const payload = normalizeChatPayload(text);
+    if (!res.ok) {
+      const failure = classifyUpstreamFailure(res.status, text, res.ok);
+      const error = new Error(failure?.message || `HTTP ${res.status}: ${trimError(text)}`);
+      error.statusCode = res.status;
+      error.body = trimError(text);
+      throw error;
+    }
+    return { payload, text };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function resultFromError(capability, err) {
+  return {
+    capability,
+    status: "failed",
+    detail: err.name === "AbortError" ? "请求超时" : (err.message || "请求失败"),
+    evidence: err.body || ""
+  };
+}
+
+function usageFromPayload(payload) {
+  const usage = payload?.usage || {};
+  return {
+    promptTokens: Number(usage.prompt_tokens || usage.input_tokens || 0),
+    completionTokens: Number(usage.completion_tokens || usage.output_tokens || 0),
+    totalTokens: Number(usage.total_tokens || 0)
+  };
+}
+
+function normalizeChatPayload(text) {
+  const direct = parseJsonSafe(text);
+  if (direct) return direct;
+
+  const events = parseSseDataPayloads(text)
+    .map((event) => parseJsonSafe(event))
+    .filter(Boolean);
+  if (!events.length) return null;
+
+  const contentParts = [];
+  const reasoningParts = [];
+  const toolCallsByIndex = new Map();
+  let finishReason = "";
+  let usage = null;
+  let id = "";
+  let model = "";
+
+  for (const event of events) {
+    id ||= event.id || "";
+    model ||= event.model || "";
+    if (event.usage) usage = event.usage;
+    const choice = event.choices?.[0];
+    if (!choice) continue;
+    finishReason ||= choice.finish_reason || choice.finishReason || "";
+
+    const delta = choice.delta || {};
+    appendContentPart(contentParts, delta.content);
+    appendContentPart(reasoningParts, delta.reasoning_content || delta.reasoning);
+    mergeToolCalls(toolCallsByIndex, delta.tool_calls || delta.function_call);
+
+    const message = choice.message || {};
+    appendContentPart(contentParts, message.content);
+    appendContentPart(reasoningParts, message.reasoning_content || message.reasoning);
+    mergeToolCalls(toolCallsByIndex, message.tool_calls || message.function_call);
+  }
+
+  return {
+    id,
+    object: "chat.completion",
+    model,
+    choices: [{
+      index: 0,
+      finish_reason: finishReason,
+      message: {
+        role: "assistant",
+        content: contentParts.join(""),
+        reasoning_content: reasoningParts.join(""),
+        tool_calls: Array.from(toolCallsByIndex.values())
+      }
+    }],
+    usage
+  };
+}
+
+function appendContentPart(parts, value) {
+  if (typeof value === "string") {
+    parts.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === "string") parts.push(item);
+      else if (typeof item?.text === "string") parts.push(item.text);
+      else if (typeof item?.content === "string") parts.push(item.content);
+    }
+  }
+}
+
+function mergeToolCalls(target, value) {
+  const calls = Array.isArray(value) ? value : value ? [value] : [];
+  for (const call of calls) {
+    const index = Number.isFinite(Number(call.index)) ? Number(call.index) : target.size;
+    const existing = target.get(index) || {
+      id: call.id || "",
+      type: call.type || "function",
+      function: { name: "", arguments: "" }
+    };
+    if (call.id) existing.id = call.id;
+    if (call.type) existing.type = call.type;
+    const fn = call.function || call;
+    if (fn.name) existing.function.name += fn.name;
+    if (fn.arguments) existing.function.arguments += fn.arguments;
+    target.set(index, existing);
+  }
+}
+
+function assistantText(payload) {
+  const message = payload?.choices?.[0]?.message;
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => typeof item === "string" ? item : item?.text || item?.content || "")
+      .join("\n");
+  }
+  if (typeof payload?.output_text === "string") return payload.output_text;
+  if (Array.isArray(payload?.output)) {
+    return payload.output
+      .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+      .map((item) => item?.text || item?.content || "")
+      .join("\n");
+  }
+  return "";
+}
+
+function assistantToolCalls(payload) {
+  const message = payload?.choices?.[0]?.message || {};
+  return [
+    ...(Array.isArray(message.tool_calls) ? message.tool_calls : []),
+    ...(Array.isArray(payload?.tool_calls) ? payload.tool_calls : [])
+  ];
+}
+
+async function testTextCompletion(target) {
+  const startedAt = Date.now();
+  try {
+    const { payload, text } = await callTestChat(target, {
+      temperature: 0,
+      max_tokens: 32,
+      messages: [
+        {
+          role: "user",
+          content: "1+1=?"
+        }
+      ]
+    });
+    const content = assistantText(payload).trim();
+    const passed = content.length > 0;
+    return {
+      capability: "text",
+      status: passed ? "passed" : "failed",
+      latencyMs: Date.now() - startedAt,
+      usage: usageFromPayload(payload),
+      detail: passed ? "HTTP 200 且 choices[0].message.content 非空" : "HTTP 200 但没有返回非空文本内容",
+      evidence: trimError(text)
+    };
+  } catch (err) {
+    return resultFromError("text", err);
+  }
+}
+
+async function testToolCalling(target) {
+  const startedAt = Date.now();
+  try {
+    const { payload, text } = await callTestChat(target, {
+      temperature: 0,
+      max_tokens: 80,
+      messages: [
+        { role: "user", content: "调用天气工具查询东京的天气。" }
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "get_current_weather",
+            description: "查询指定城市的天气",
+            parameters: {
+              type: "object",
+              properties: {
+                location: { type: "string", description: "城市名称" }
+              },
+              required: ["location"]
+            }
+          }
+        }
+      ],
+      tool_choice: "auto"
+    });
+    const calls = assistantToolCalls(payload);
+    const finishReason = payload?.choices?.[0]?.finish_reason || payload?.choices?.[0]?.finishReason || "";
+    const matched = calls.some((call) => {
+      const fn = call.function || call;
+      const args = typeof fn.arguments === "string" ? parseJsonSafe(fn.arguments) : fn.arguments;
+      return fn.name === "get_current_weather" && String(args?.location || "").includes("东京");
+    });
+    const toolFinish = finishReason === "tool_calls" || finishReason === "function_call";
+    return {
+      capability: "tool",
+      status: matched && toolFinish ? "passed" : calls.length ? "uncertain" : "failed",
+      latencyMs: Date.now() - startedAt,
+      usage: usageFromPayload(payload),
+      detail: matched && toolFinish
+        ? "HTTP 200，finish_reason 为 tool_calls/function_call，且包含正确工具名和参数"
+        : calls.length
+          ? "返回了工具调用字段，但 finish_reason 或参数不完全符合预期"
+          : "未返回 tool_calls/function_call，可能降级为普通文本或不支持 tools",
+      evidence: trimError(text)
+    };
+  } catch (err) {
+    return resultFromError("tool", err);
+  }
+}
+
+function visionTestImageDataUrl() {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="#ffffff"/><text x="42" y="76" font-family="Arial" font-size="48" font-weight="700" fill="#111827">9527</text></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+async function testVision(target) {
+  const startedAt = Date.now();
+  try {
+    const { payload, text } = await callTestChat(target, {
+      temperature: 0,
+      max_tokens: 80,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "图里的数字是多少？只回答数字。" },
+            { type: "image_url", image_url: { url: visionTestImageDataUrl() } }
+          ]
+        }
+      ]
+    });
+    const content = assistantText(payload).trim();
+    const hasText = content.length > 0;
+    const identified = content.includes("9527");
+    const refusal = /cannot|can't|unable|image|vision|无法|不能|看不到|无法查看/.test(content.toLowerCase());
+    return {
+      capability: "vision",
+      status: identified ? "passed" : hasText && !refusal ? "uncertain" : "failed",
+      latencyMs: Date.now() - startedAt,
+      usage: usageFromPayload(payload),
+      detail: identified
+        ? "HTTP 200，接口接受 image_url，并正确识别图片数字 9527"
+        : hasText && !refusal
+          ? "HTTP 200 且有文本回复，但未识别出 9527，可能静默忽略图片或视觉能力不稳定"
+        : refusal
+          ? "模型表示无法读取图片"
+          : "HTTP 200 但没有返回可读文本",
+      evidence: trimError(text)
+    };
+  } catch (err) {
+    return resultFromError("vision", err);
+  }
+}
+
 function configuredProviders(cfg) {
   const targets = [
     ...(cfg.models || []).flatMap((model) => model.targets || []),
@@ -1158,6 +1522,11 @@ async function handleAdminApi(req, res, pathname, cfg) {
     } catch (err) {
       sendError(res, 400, err.message || "Cannot check provider health");
     }
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/model-tests/run") {
+    await handleModelTests(req, res);
     return;
   }
 

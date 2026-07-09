@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import type { Provider, FailoverChain, Page, LogEntry } from './types';
+import type { Provider, FailoverChain, Page, LogEntry, ModelCapability, ModelTestResult, ModelTestTarget } from './types';
 
 interface BackendTarget {
   name?: string;
@@ -489,6 +489,7 @@ const StoreContext = createContext<{
   saveConfig: (tokenOverride?: string) => Promise<void>;
   fetchProviderModels: (url: string, apiKey: string) => Promise<string[]>;
   refreshProviderHealth: () => Promise<void>;
+  runModelTests: (targets: ModelTestTarget[], capabilities: ModelCapability[]) => Promise<ModelTestResult[]>;
 } | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
@@ -581,6 +582,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_PROVIDER_HEALTHS', providers: body.providers || [] });
   }, [state.adminToken, state.configLoaded, providerHealthRequest]);
 
+  const runModelTests = useCallback(async (targets: ModelTestTarget[], capabilities: ModelCapability[]) => {
+    const res = await fetch('/api/model-tests/run', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-admin-token': state.adminToken,
+      },
+      body: JSON.stringify({ targets, capabilities }),
+    });
+    if (!res.ok) throw new Error(await readJsonError(res));
+    const body = await res.json();
+    return body.results || [];
+  }, [state.adminToken]);
+
   useEffect(() => {
     loadConfig().catch(() => undefined);
   }, [loadConfig]);
@@ -608,7 +623,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [state.configLoaded, providerHealthSignature, refreshProviderHealth]);
 
   return (
-    <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels, refreshProviderHealth }}>
+    <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels, refreshProviderHealth, runModelTests }}>
       {children}
     </StoreContext.Provider>
   );

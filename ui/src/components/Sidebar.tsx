@@ -11,6 +11,7 @@ import {
   Shield,
   Save,
   RefreshCw,
+  TestTube,
 } from 'lucide-react';
 import { useStore } from '../store';
 import type { Page } from '../types';
@@ -19,6 +20,7 @@ import { cn } from '../utils/cn';
 const navItems: { page: Page; label: string; icon: React.ReactNode }[] = [
   { page: 'dashboard', label: '仪表盘', icon: <LayoutDashboard size={20} /> },
   { page: 'providers', label: '模型提供商', icon: <Server size={20} /> },
+  { page: 'model-tests', label: '模型测试', icon: <TestTube size={20} /> },
   { page: 'chains', label: '故障转移链', icon: <GitBranch size={20} /> },
   { page: 'endpoints', label: '代理端点', icon: <Link2 size={20} /> },
   { page: 'logs', label: '请求日志', icon: <ScrollText size={20} /> },
