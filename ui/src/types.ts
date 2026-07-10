@@ -27,6 +27,8 @@ export interface FailoverChain {
   strategy: 'priority' | 'round-robin' | 'weighted' | 'latency-based';
   proxyModelName: string;
   proxyApiKey: string;
+  concurrency: number;
+  releaseDelaySeconds: number;
   enabled: boolean;
   createdAt: number;
   totalRequests: number;

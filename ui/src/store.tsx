@@ -19,6 +19,8 @@ interface BackendModel {
   publicName: string;
   enabled?: boolean;
   strategy?: FailoverChain['strategy'];
+  concurrency?: number;
+  releaseDelayMs?: number;
   targets?: BackendTarget[];
 }
 
@@ -167,6 +169,8 @@ function normalizeChain(chain: FailoverChain): FailoverChain {
   return {
     ...chain,
     strategy: chain.strategy === 'weighted' ? 'priority' : chain.strategy || 'priority',
+    concurrency: Math.max(1, Math.min(64, Math.floor(Number(chain.concurrency) || 1))),
+    releaseDelaySeconds: Math.max(0, Math.min(3600, Math.floor(Number(chain.releaseDelaySeconds) || 0))),
     models: normalizeChainModels(chain.models || []),
   };
 }
@@ -372,6 +376,8 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
       strategy: model.strategy === 'weighted' ? 'priority' : model.strategy || 'priority',
       proxyModelName: model.publicName,
       proxyApiKey: firstProxyKey,
+      concurrency: Math.max(1, Math.min(64, Math.floor(Number(model.concurrency) || 1))),
+      releaseDelaySeconds: Math.max(0, Math.min(3600, Math.round(Number(model.releaseDelayMs || 0) / 1000))),
       enabled: model.enabled !== false,
       createdAt: Date.now(),
       totalRequests,
@@ -428,6 +434,8 @@ function uiToBackend(state: State): BackendConfig {
     publicName: chain.proxyModelName,
     enabled: chain.enabled,
     strategy: chain.strategy,
+    concurrency: Math.max(1, Math.min(64, Math.floor(Number(chain.concurrency) || 1))),
+    releaseDelayMs: Math.max(0, Math.min(3600, Math.floor(Number(chain.releaseDelaySeconds) || 0))) * 1000,
     targets: [...chain.models]
       .sort((a, b) => a.priority - b.priority)
       .map((model, index) => {

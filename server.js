@@ -87,6 +87,8 @@ const defaultConfig = {
     {
       publicName: "gpt-failover",
       enabled: true,
+      concurrency: 1,
+      releaseDelayMs: 0,
       targets: [
         {
           name: "primary-openai",
@@ -114,6 +116,7 @@ const modelSourceCache = {
   models: [],
   error: ""
 };
+const proxyConcurrency = new Map();
 
 async function ensureConfig() {
   await mkdir(dataDir, { recursive: true });
@@ -160,6 +163,8 @@ function normalizeModelConfig(model) {
   normalized.publicName = String(normalized.publicName || "");
   normalized.enabled = normalized.enabled !== false;
   normalized.strategy = validStrategies.has(normalized.strategy) ? normalized.strategy : "priority";
+  normalized.concurrency = Math.max(1, Math.min(64, Math.floor(Number(normalized.concurrency) || 1)));
+  normalized.releaseDelayMs = Math.max(0, Math.min(3600000, Math.floor(Number(normalized.releaseDelayMs) || 0)));
   normalized.targets = normalizeTargetQueue(normalized.targets);
   return normalized;
 }
@@ -644,7 +649,7 @@ async function sourceRuntimeModels(cfg, force = false) {
   const filtered = filterSourceModels(remoteModels, source);
   const generated = filtered.map((item) => {
     const publicName = `${source.publicPrefix}${item.id}${source.publicSuffix}`;
-    return {
+    return normalizeModelConfig({
       publicName,
       enabled: true,
       sourceModelName: item.id,
@@ -652,7 +657,7 @@ async function sourceRuntimeModels(cfg, force = false) {
         ...target,
         modelName: resolveTargetModelName(target, item.id)
       }))
-    };
+    });
   });
 
   modelSourceCache.cacheKey = cacheKey;
@@ -745,24 +750,18 @@ async function handleModelTests(req, res) {
       return;
     }
 
-    const results = await runWithConcurrency(targets, 3, (target) => testModelCapabilities(target, capabilities));
+    const results = await runSequentially(targets, (target) => testModelCapabilities(target, capabilities));
     send(res, 200, { ok: true, results });
   } catch (err) {
     sendError(res, 400, err.message || "Cannot run model tests");
   }
 }
 
-async function runWithConcurrency(items, limit, worker) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await worker(items[index], index);
-    }
-  });
-  await Promise.all(workers);
+async function runSequentially(items, worker) {
+  const results = [];
+  for (const [index, item] of items.entries()) {
+    results.push(await worker(item, index));
+  }
   return results;
 }
 
@@ -1169,6 +1168,63 @@ async function callTarget(req, pathname, body, model, target, cfg) {
   }
 }
 
+function proxyConcurrencyKey(model) {
+  return model.publicName || "__default__";
+}
+
+function proxyConcurrencyState(model) {
+  const key = proxyConcurrencyKey(model);
+  let state = proxyConcurrency.get(key);
+  if (!state) {
+    state = { active: 0, queue: [], limit: 1, releaseDelayMs: 0 };
+    proxyConcurrency.set(key, state);
+  }
+  state.limit = Math.max(1, Math.min(64, Math.floor(Number(model.concurrency) || 1)));
+  state.releaseDelayMs = Math.max(0, Math.min(3600000, Math.floor(Number(model.releaseDelayMs) || 0)));
+  return state;
+}
+
+function releaseProxySlot(state) {
+  if (state.active > 0) state.active -= 1;
+  pumpProxyQueue(state);
+}
+
+function makeProxySlotRelease(state) {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const releaseDelayMs = state.releaseDelayMs;
+    if (releaseDelayMs > 0) {
+      const timer = setTimeout(() => releaseProxySlot(state), releaseDelayMs);
+      timer.unref?.();
+      return;
+    }
+    releaseProxySlot(state);
+  };
+}
+
+function pumpProxyQueue(state) {
+  while (state.active < state.limit && state.queue.length > 0) {
+    const queued = state.queue.shift();
+    state.active += 1;
+    queued.resolve(makeProxySlotRelease(state));
+  }
+}
+
+function acquireProxySlot(model) {
+  const state = proxyConcurrencyState(model);
+  if (state.active < state.limit) {
+    state.active += 1;
+    return Promise.resolve(makeProxySlotRelease(state));
+  }
+
+  return new Promise((resolve) => {
+    state.queue.push({ resolve });
+    pumpProxyQueue(state);
+  });
+}
+
 async function handleModels(req, res, cfg) {
   if (!isProxyKey(req, cfg)) {
     sendError(res, 401, "Invalid proxy API key");
@@ -1216,6 +1272,15 @@ async function handleProxy(req, res, pathname, cfg) {
     return;
   }
 
+  let releaseProxy = null;
+  try {
+    releaseProxy = await acquireProxySlot(model);
+  } catch (err) {
+    sendError(res, err.statusCode || 503, err.message || "Proxy concurrency slot unavailable");
+    return;
+  }
+
+  try {
   stats.requests += 1;
   const chain = chainStats(model);
   chain.requests += 1;
@@ -1226,9 +1291,21 @@ async function handleProxy(req, res, pathname, cfg) {
   let attempted = 0;
 
   for (const target of targets) {
+    if (isCircuitOpen(model, target)) {
+      errors.push({ target: target.name, message: "circuit open" });
+      failedModels.push(targetLabel(target));
+      continue;
+    }
+
     const maxAttempts = 1 + Math.max(0, Math.floor(Number(target.maxRetries) || 0));
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (isCircuitOpen(model, target)) {
+        errors.push({ target: target.name, attempt, message: "circuit open" });
+        failedModels.push(targetLabel(target));
+        break;
+      }
+
       attempted += 1;
       const targetStartedAt = Date.now();
       let upstream;
@@ -1462,6 +1539,9 @@ async function handleProxy(req, res, pathname, cfg) {
     error: errors.map(formatAttemptError).join(", ")
   });
   sendError(res, 503, "All configured targets failed before a response could be returned", errors);
+  } finally {
+    releaseProxy?.();
+  }
 }
 
 function targetLabel(target) {
