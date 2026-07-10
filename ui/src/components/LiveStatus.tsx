@@ -1,0 +1,166 @@
+import { Activity, Clock3, GitBranch, Loader2, Radio, Server, TimerReset } from 'lucide-react';
+import { useStore } from '../store';
+import type { ActiveThread } from '../types';
+import { cn } from '../utils/cn';
+
+const phaseMeta: Record<string, { label: string; className: string }> = {
+  starting: { label: '创建中', className: 'border-slate-200 bg-slate-50 text-slate-600' },
+  calling: { label: '调用中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+  retrying: { label: '重试中', className: 'border-amber-200 bg-amber-50 text-amber-700' },
+  streaming: { label: '流式转发', className: 'border-cyan-200 bg-cyan-50 text-cyan-700' },
+  skipped: { label: '已跳过', className: 'border-slate-200 bg-slate-50 text-slate-600' },
+  'failed-target': { label: '目标失败', className: 'border-red-200 bg-red-50 text-red-700' },
+  completed: { label: '已响应', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+  failed: { label: '失败', className: 'border-red-200 bg-red-50 text-red-700' },
+  'release-wait': { label: '释放等待', className: 'border-violet-200 bg-violet-50 text-violet-700' },
+};
+
+function elapsedText(startedAt: number, now: number) {
+  if (!startedAt) return '0s';
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+function releaseText(thread: ActiveThread, now: number) {
+  if (thread.phase !== 'release-wait' || !thread.releaseAt) return '';
+  const seconds = Math.max(0, Math.ceil((thread.releaseAt - now) / 1000));
+  return `${seconds}s 后释放`;
+}
+
+function PhasePill({ phase }: { phase: string }) {
+  const meta = phaseMeta[phase] || { label: phase || '未知', className: 'border-slate-200 bg-slate-50 text-slate-600' };
+  return (
+    <span className={cn('inline-flex items-center rounded-full border px-2 py-1 text-xs font-medium', meta.className)}>
+      {meta.label}
+    </span>
+  );
+}
+
+function ThreadCard({ thread, now }: { thread: ActiveThread; now: number }) {
+  const targetLabel = thread.targetModel || thread.targetName || thread.targetBaseUrl || '等待目标';
+  const release = releaseText(thread, now);
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:border-blue-200">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+              <Radio size={15} />
+            </span>
+            <h3 className="truncate font-semibold text-slate-800">{thread.chainName}</h3>
+            <PhasePill phase={thread.phase} />
+            <span className="rounded-full bg-slate-100 px-2 py-1 font-mono text-xs text-slate-500">
+              #{thread.slot || thread.id}
+            </span>
+          </div>
+          <p className="mt-2 text-sm text-slate-600">{thread.status}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+          <span className="inline-flex items-center gap-1">
+            <Clock3 size={13} />
+            {elapsedText(thread.startedAt, now)}
+          </span>
+          {release && (
+            <span className="inline-flex items-center gap-1 text-violet-600">
+              <TimerReset size={13} />
+              {release}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="rounded-lg bg-slate-50 p-3">
+          <p className="text-xs text-slate-400">请求模型</p>
+          <p className="mt-1 truncate font-mono text-sm text-slate-700">{thread.requestedModel || '-'}</p>
+        </div>
+        <div className="rounded-lg bg-slate-50 p-3">
+          <p className="text-xs text-slate-400">正在尝试</p>
+          <p className="mt-1 truncate font-mono text-sm text-blue-700">{targetLabel}</p>
+        </div>
+        <div className="rounded-lg bg-slate-50 p-3">
+          <p className="text-xs text-slate-400">尝试次数</p>
+          <p className="mt-1 font-mono text-sm text-slate-700">
+            {thread.attempt || 0}{thread.maxAttempts ? ` / ${thread.maxAttempts}` : ''}
+          </p>
+        </div>
+      </div>
+
+      {(thread.targetName || thread.targetBaseUrl || thread.failedModels.length > 0) && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          {thread.targetName && <span className="rounded-md bg-slate-100 px-2 py-1">{thread.targetName}</span>}
+          {thread.targetBaseUrl && <span className="rounded-md bg-slate-100 px-2 py-1 font-mono">{thread.targetBaseUrl}</span>}
+          {thread.failedModels.map(model => (
+            <span key={model} className="rounded-md bg-red-50 px-2 py-1 font-mono text-red-600">{model}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function LiveStatus() {
+  const { state } = useStore();
+  const now = Date.now();
+  const threads = state.activeThreads;
+  const releasing = threads.filter(thread => thread.phase === 'release-wait').length;
+  const activeChains = new Set(threads.map(thread => thread.chainName)).size;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
+            <Activity size={13} />
+            Live Threads
+          </div>
+          <h2 className="mt-3 text-2xl font-bold text-slate-800">实时状况</h2>
+          <p className="mt-1 text-slate-500">查看代理 API 当前创建的线程和正在尝试的目标模型。</p>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+          <Loader2 size={15} className="animate-spin" />
+          自动刷新
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-slate-500">活动线程</span>
+            <Radio size={16} className="text-blue-500" />
+          </div>
+          <p className="mt-2 text-2xl font-bold text-slate-800">{threads.length}</p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-slate-500">涉及链路</span>
+            <GitBranch size={16} className="text-violet-500" />
+          </div>
+          <p className="mt-2 text-2xl font-bold text-slate-800">{activeChains}</p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-slate-500">释放等待</span>
+            <TimerReset size={16} className="text-amber-500" />
+          </div>
+          <p className="mt-2 text-2xl font-bold text-slate-800">{releasing}</p>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {threads.map(thread => (
+          <ThreadCard key={thread.id} thread={thread} now={now} />
+        ))}
+        {!threads.length && (
+          <div className="rounded-xl border border-dashed border-slate-200 bg-white py-16 text-center">
+            <Server size={36} className="mx-auto text-slate-300" />
+            <p className="mt-3 text-sm text-slate-500">当前没有活动线程</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

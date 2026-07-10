@@ -40,6 +40,7 @@ const stats = {
 const circuitBreakers = new Map();
 const roundRobinCursors = new Map();
 const validStrategies = new Set(["priority", "round-robin", "weighted", "latency-based"]);
+let proxyThreadSeq = 0;
 
 const defaultConfig = {
   adminToken: "admin",
@@ -117,6 +118,7 @@ const modelSourceCache = {
   error: ""
 };
 const proxyConcurrency = new Map();
+const activeProxyThreads = new Map();
 
 async function ensureConfig() {
   await mkdir(dataDir, { recursive: true });
@@ -1189,17 +1191,74 @@ function releaseProxySlot(state) {
   pumpProxyQueue(state);
 }
 
-function makeProxySlotRelease(state) {
+function proxyThreadSnapshot(thread) {
+  return {
+    id: thread.id,
+    slot: thread.slot,
+    chainName: thread.chainName,
+    requestedModel: thread.requestedModel,
+    targetName: thread.targetName || "",
+    targetModel: thread.targetModel || "",
+    targetBaseUrl: thread.targetBaseUrl || "",
+    attempt: thread.attempt || 0,
+    maxAttempts: thread.maxAttempts || 0,
+    phase: thread.phase,
+    status: thread.status,
+    startedAt: thread.startedAt,
+    updatedAt: thread.updatedAt,
+    releaseAt: thread.releaseAt || 0,
+    failedModels: thread.failedModels || []
+  };
+}
+
+function activeProxyThreadSnapshots() {
+  return Array.from(activeProxyThreads.values())
+    .map(proxyThreadSnapshot)
+    .sort((a, b) => a.startedAt - b.startedAt);
+}
+
+function createProxyThread(state, model, requestedModel) {
+  proxyThreadSeq += 1;
+  const thread = {
+    id: `thread-${proxyThreadSeq}`,
+    slot: state.active,
+    chainName: model.publicName || "",
+    requestedModel: requestedModel || model.publicName || "",
+    phase: "starting",
+    status: "线程已创建，等待尝试目标模型",
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    failedModels: []
+  };
+  activeProxyThreads.set(thread.id, thread);
+  return thread;
+}
+
+function updateProxyThread(thread, updates) {
+  if (!thread || !activeProxyThreads.has(thread.id)) return;
+  Object.assign(thread, updates, { updatedAt: Date.now() });
+}
+
+function makeProxySlotRelease(state, thread) {
   let released = false;
   return () => {
     if (released) return;
     released = true;
     const releaseDelayMs = state.releaseDelayMs;
     if (releaseDelayMs > 0) {
-      const timer = setTimeout(() => releaseProxySlot(state), releaseDelayMs);
+      updateProxyThread(thread, {
+        phase: "release-wait",
+        status: `请求已结束，等待 ${Math.ceil(releaseDelayMs / 1000)} 秒释放线程`,
+        releaseAt: Date.now() + releaseDelayMs
+      });
+      const timer = setTimeout(() => {
+        activeProxyThreads.delete(thread.id);
+        releaseProxySlot(state);
+      }, releaseDelayMs);
       timer.unref?.();
       return;
     }
+    activeProxyThreads.delete(thread.id);
     releaseProxySlot(state);
   };
 }
@@ -1208,19 +1267,21 @@ function pumpProxyQueue(state) {
   while (state.active < state.limit && state.queue.length > 0) {
     const queued = state.queue.shift();
     state.active += 1;
-    queued.resolve(makeProxySlotRelease(state));
+    const thread = createProxyThread(state, queued.model, queued.requestedModel);
+    queued.resolve({ thread, release: makeProxySlotRelease(state, thread) });
   }
 }
 
-function acquireProxySlot(model) {
+function acquireProxySlot(model, requestedModel) {
   const state = proxyConcurrencyState(model);
   if (state.active < state.limit) {
     state.active += 1;
-    return Promise.resolve(makeProxySlotRelease(state));
+    const thread = createProxyThread(state, model, requestedModel);
+    return Promise.resolve({ thread, release: makeProxySlotRelease(state, thread) });
   }
 
   return new Promise((resolve) => {
-    state.queue.push({ resolve });
+    state.queue.push({ resolve, model, requestedModel });
     pumpProxyQueue(state);
   });
 }
@@ -1272,13 +1333,14 @@ async function handleProxy(req, res, pathname, cfg) {
     return;
   }
 
-  let releaseProxy = null;
+  let proxySlot = null;
   try {
-    releaseProxy = await acquireProxySlot(model);
+    proxySlot = await acquireProxySlot(model, requestedModel);
   } catch (err) {
     sendError(res, err.statusCode || 503, err.message || "Proxy concurrency slot unavailable");
     return;
   }
+  const proxyThread = proxySlot.thread;
 
   try {
   stats.requests += 1;
@@ -1292,6 +1354,16 @@ async function handleProxy(req, res, pathname, cfg) {
 
   for (const target of targets) {
     if (isCircuitOpen(model, target)) {
+      updateProxyThread(proxyThread, {
+        targetName: target.name || "",
+        targetModel: target.modelName || "",
+        targetBaseUrl: target.baseUrl || "",
+        attempt: 0,
+        maxAttempts: 0,
+        phase: "skipped",
+        status: "目标模型处于熔断状态，已跳过",
+        failedModels: [...failedModels, targetLabel(target)]
+      });
       errors.push({ target: target.name, message: "circuit open" });
       failedModels.push(targetLabel(target));
       continue;
@@ -1301,6 +1373,16 @@ async function handleProxy(req, res, pathname, cfg) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (isCircuitOpen(model, target)) {
+        updateProxyThread(proxyThread, {
+          targetName: target.name || "",
+          targetModel: target.modelName || "",
+          targetBaseUrl: target.baseUrl || "",
+          attempt,
+          maxAttempts,
+          phase: "skipped",
+          status: "目标模型在重试前进入熔断，已跳过",
+          failedModels: [...failedModels, targetLabel(target)]
+        });
         errors.push({ target: target.name, attempt, message: "circuit open" });
         failedModels.push(targetLabel(target));
         break;
@@ -1309,10 +1391,25 @@ async function handleProxy(req, res, pathname, cfg) {
       attempted += 1;
       const targetStartedAt = Date.now();
       let upstream;
+      updateProxyThread(proxyThread, {
+        targetName: target.name || "",
+        targetModel: target.modelName || "",
+        targetBaseUrl: target.baseUrl || "",
+        attempt,
+        maxAttempts,
+        phase: "calling",
+        status: `正在尝试 ${targetLabel(target)} (#${attempt}/${maxAttempts})`,
+        failedModels: [...failedModels]
+      });
       try {
         upstream = await callTarget(req, pathname, body, model, target, cfg);
       } catch (err) {
         const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+        updateProxyThread(proxyThread, {
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} 请求失败：${failure.message}`,
+          failedModels: [...failedModels]
+        });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, message: failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
@@ -1328,11 +1425,21 @@ async function handleProxy(req, res, pathname, cfg) {
           message: `Upstream returned ${upstream.status}`,
           body: trimError(text)
         };
+        updateProxyThread(proxyThread, {
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} 返回 ${failure.status || upstream.status}`,
+          failedModels: [...failedModels]
+        });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, status: failure.status || upstream.status, body: failure.body || failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
         failedModels.push(targetLabel(target));
         if (shouldTryNext(failure.status || upstream.status, cfg)) break;
+        updateProxyThread(proxyThread, {
+          phase: "failed",
+          status: failure.message || `请求失败：${upstream.status}`,
+          failedModels
+        });
         stats.failures += 1;
         chain.failures += 1;
         addLog({
@@ -1352,11 +1459,21 @@ async function handleProxy(req, res, pathname, cfg) {
         const text = await upstream.text().catch(() => "");
         const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
         if (failure) {
+          updateProxyThread(proxyThread, {
+            phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
+            status: `${targetLabel(target)} 响应内容判定失败：${failure.message}`,
+            failedModels: [...failedModels]
+          });
           recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
           errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
           if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
           failedModels.push(targetLabel(target));
           if (shouldTryNext(failure.status, cfg)) break;
+          updateProxyThread(proxyThread, {
+            phase: "failed",
+            status: failure.message,
+            failedModels
+          });
           stats.failures += 1;
           chain.failures += 1;
           addLog({
@@ -1373,6 +1490,11 @@ async function handleProxy(req, res, pathname, cfg) {
         }
 
         recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
+        updateProxyThread(proxyThread, {
+          phase: "completed",
+          status: `已由 ${targetLabel(target)} 返回非流式响应`,
+          failedModels
+        });
         stats.successes += 1;
         chain.successes += 1;
         if (failedModels.length > 0) {
@@ -1404,6 +1526,11 @@ async function handleProxy(req, res, pathname, cfg) {
         inspected = await inspectInitialStream(upstream);
       } catch (err) {
         const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+        updateProxyThread(proxyThread, {
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} 流式响应探测失败：${failure.message}`,
+          failedModels: [...failedModels]
+        });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, message: failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
@@ -1414,11 +1541,21 @@ async function handleProxy(req, res, pathname, cfg) {
       if (inspected.failure) {
         await inspected.reader?.cancel().catch(() => undefined);
         const failure = inspected.failure;
+        updateProxyThread(proxyThread, {
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} 初始流返回失败：${failure.message}`,
+          failedModels: [...failedModels]
+        });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
         failedModels.push(targetLabel(target));
         if (shouldTryNext(failure.status, cfg)) break;
+        updateProxyThread(proxyThread, {
+          phase: "failed",
+          status: failure.message,
+          failedModels
+        });
         stats.failures += 1;
         chain.failures += 1;
         addLog({
@@ -1442,10 +1579,20 @@ async function handleProxy(req, res, pathname, cfg) {
       });
 
       res.writeHead(upstream.status, headers);
+      updateProxyThread(proxyThread, {
+        phase: "streaming",
+        status: `正在转发 ${targetLabel(target)} 的流式响应`,
+        failedModels
+      });
 
       if (!inspected.reader) {
         res.end();
         recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
+        updateProxyThread(proxyThread, {
+          phase: "completed",
+          status: `已由 ${targetLabel(target)} 返回空流响应`,
+          failedModels
+        });
         stats.successes += 1;
         chain.successes += 1;
         if (failedModels.length > 0) {
@@ -1489,6 +1636,11 @@ async function handleProxy(req, res, pathname, cfg) {
         res.end();
         if (streamFailure) {
           recordTargetFailure(model, target, cfg, streamFailure, Date.now() - targetStartedAt);
+          updateProxyThread(proxyThread, {
+            phase: "failed",
+            status: `流式响应中检测到失败：${streamFailure.message}`,
+            failedModels: [...failedModels, targetLabel(target)]
+          });
           stats.failures += 1;
           chain.failures += 1;
           const streamFailedModels = [...failedModels, targetLabel(target)];
@@ -1505,6 +1657,11 @@ async function handleProxy(req, res, pathname, cfg) {
         }
 
         recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
+        updateProxyThread(proxyThread, {
+          phase: "completed",
+          status: `已完成 ${targetLabel(target)} 的流式响应`,
+          failedModels
+        });
         stats.successes += 1;
         chain.successes += 1;
         if (failedModels.length > 0) {
@@ -1521,6 +1678,11 @@ async function handleProxy(req, res, pathname, cfg) {
           error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
         });
       } catch (err) {
+        updateProxyThread(proxyThread, {
+          phase: "failed",
+          status: `客户端连接或流转发失败：${err.message}`,
+          failedModels
+        });
         res.destroy(err);
       }
       return;
@@ -1529,6 +1691,11 @@ async function handleProxy(req, res, pathname, cfg) {
 
   stats.failures += 1;
   chain.failures += 1;
+  updateProxyThread(proxyThread, {
+    phase: "failed",
+    status: "所有配置的目标模型均失败",
+    failedModels
+  });
   addLog({
     chainName: model.publicName,
     originalModel: requestedModel,
@@ -1540,7 +1707,7 @@ async function handleProxy(req, res, pathname, cfg) {
   });
   sendError(res, 503, "All configured targets failed before a response could be returned", errors);
   } finally {
-    releaseProxy?.();
+    proxySlot?.release?.();
   }
 }
 
@@ -1589,7 +1756,10 @@ async function handleAdminApi(req, res, pathname, cfg) {
   }
 
   if (req.method === "GET" && pathname === "/api/stats") {
-    send(res, 200, stats);
+    send(res, 200, {
+      ...stats,
+      activeThreads: activeProxyThreadSnapshots()
+    });
     return;
   }
 

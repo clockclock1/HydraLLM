@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import type { Provider, FailoverChain, Page, LogEntry, ModelCapability, ModelTestResult, ModelTestTarget } from './types';
+import type { Provider, FailoverChain, Page, LogEntry, ActiveThread, ModelCapability, ModelTestResult, ModelTestTarget } from './types';
 
 interface BackendTarget {
   name?: string;
@@ -69,6 +69,7 @@ interface BackendStats {
     latency: number;
     error?: string;
   }>;
+  activeThreads?: ActiveThread[];
 }
 
 interface State {
@@ -76,6 +77,7 @@ interface State {
   providers: Provider[];
   chains: FailoverChain[];
   logs: LogEntry[];
+  activeThreads: ActiveThread[];
   sidebarCollapsed: boolean;
   adminToken: string;
   configLoaded: boolean;
@@ -140,6 +142,7 @@ const initialState: State = {
   providers: [],
   chains: [],
   logs: [],
+  activeThreads: [],
   adminToken: localStorage.getItem('adminToken') || 'admin',
   configLoaded: false,
   saveStatus: 'idle',
@@ -217,6 +220,7 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         ...mapped,
+        activeThreads: ((action.stats || null)?.activeThreads || []).map(normalizeActiveThread),
         backendConfig: action.config,
         backendStats: action.stats || null,
         circuitFailureThreshold: Math.max(1, Number(circuitBreaker?.failureThreshold || 3)),
@@ -281,6 +285,7 @@ function applyStatsToState(state: State, stats: BackendStats): State {
   return {
     ...state,
     backendStats: stats,
+    activeThreads: (stats.activeThreads || []).map(normalizeActiveThread),
     chains: state.chains.map((chain) => {
       const modelStats = stats.chains?.[chain.proxyModelName];
       if (!modelStats) return chain;
@@ -304,6 +309,26 @@ function applyStatsToState(state: State, stats: BackendStats): State {
       latency: log.latency,
       error: log.error,
     })),
+  };
+}
+
+function normalizeActiveThread(thread: ActiveThread): ActiveThread {
+  return {
+    id: String(thread.id || ''),
+    slot: Math.max(0, Math.floor(Number(thread.slot) || 0)),
+    chainName: String(thread.chainName || ''),
+    requestedModel: String(thread.requestedModel || ''),
+    targetName: String(thread.targetName || ''),
+    targetModel: String(thread.targetModel || ''),
+    targetBaseUrl: String(thread.targetBaseUrl || ''),
+    attempt: Math.max(0, Math.floor(Number(thread.attempt) || 0)),
+    maxAttempts: Math.max(0, Math.floor(Number(thread.maxAttempts) || 0)),
+    phase: String(thread.phase || 'unknown'),
+    status: String(thread.status || ''),
+    startedAt: Number(thread.startedAt || 0),
+    updatedAt: Number(thread.updatedAt || 0),
+    releaseAt: Number(thread.releaseAt || 0),
+    failedModels: Array.isArray(thread.failedModels) ? thread.failedModels.map(String) : [],
   };
 }
 
@@ -617,7 +642,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (stats) dispatch({ type: 'LOAD_BACKEND_STATS', stats });
         })
         .catch(() => undefined);
-    }, 10000);
+    }, 1000);
     return () => window.clearInterval(timer);
   }, [state.configLoaded, state.adminToken]);
 

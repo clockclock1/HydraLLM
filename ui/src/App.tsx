@@ -5,6 +5,7 @@ import Providers from './components/Providers';
 import ModelTests from './components/ModelTests';
 import FailoverChains from './components/FailoverChains';
 import ProxyEndpoints from './components/ProxyEndpoints';
+import LiveStatus from './components/LiveStatus';
 import Logs from './components/Logs';
 import Settings from './components/Settings';
 
@@ -17,6 +18,7 @@ function PageContent() {
     'model-tests': <ModelTests />,
     chains: <FailoverChains />,
     endpoints: <ProxyEndpoints />,
+    'live-status': <LiveStatus />,
     logs: <Logs />,
     settings: <Settings />,
   };

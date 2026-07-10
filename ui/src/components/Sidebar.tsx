@@ -12,6 +12,7 @@ import {
   Save,
   RefreshCw,
   TestTube,
+  Activity,
 } from 'lucide-react';
 import { useStore } from '../store';
 import type { Page } from '../types';
@@ -23,6 +24,7 @@ const navItems: { page: Page; label: string; icon: React.ReactNode }[] = [
   { page: 'model-tests', label: '模型测试', icon: <TestTube size={20} /> },
   { page: 'chains', label: '故障转移链', icon: <GitBranch size={20} /> },
   { page: 'endpoints', label: '代理端点', icon: <Link2 size={20} /> },
+  { page: 'live-status', label: '实时状况', icon: <Activity size={20} /> },
   { page: 'logs', label: '请求日志', icon: <ScrollText size={20} /> },
   { page: 'settings', label: '队列设置', icon: <SlidersHorizontal size={20} /> },
 ];

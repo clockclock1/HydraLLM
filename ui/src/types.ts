@@ -36,7 +36,25 @@ export interface FailoverChain {
   successRate: number;
 }
 
-export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'endpoints' | 'logs' | 'settings';
+export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'endpoints' | 'live-status' | 'logs' | 'settings';
+
+export interface ActiveThread {
+  id: string;
+  slot: number;
+  chainName: string;
+  requestedModel: string;
+  targetName: string;
+  targetModel: string;
+  targetBaseUrl: string;
+  attempt: number;
+  maxAttempts: number;
+  phase: string;
+  status: string;
+  startedAt: number;
+  updatedAt: number;
+  releaseAt: number;
+  failedModels: string[];
+}
 
 export interface LogEntry {
   id: string;
