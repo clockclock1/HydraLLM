@@ -21,6 +21,11 @@ interface BackendModel {
   strategy?: FailoverChain['strategy'];
   concurrency?: number;
   releaseDelayMs?: number;
+  circuitBreaker?: {
+    failureThreshold?: number;
+    cooldownMinutes?: number;
+    immediateCooldownStatusCodes?: number[];
+  };
   targets?: BackendTarget[];
 }
 
@@ -85,18 +90,12 @@ interface State {
   saveError: string;
   backendConfig: BackendConfig | null;
   backendStats: BackendStats | null;
-  circuitFailureThreshold: number;
-  circuitCooldownMinutes: number;
-  targetTimeoutSeconds: number;
-  targetMaxRetries: number;
 }
 
 type Action =
   | { type: 'SET_PAGE'; page: Page }
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_ADMIN_TOKEN'; token: string }
-  | { type: 'SET_CIRCUIT_SETTINGS'; failureThreshold: number; cooldownMinutes: number }
-  | { type: 'SET_TARGET_SETTINGS'; timeoutSeconds: number; maxRetries: number }
   | { type: 'SET_SAVE_STATUS'; status: State['saveStatus']; error?: string }
   | { type: 'LOAD_BACKEND_STATE'; config: BackendConfig; stats?: BackendStats | null }
   | { type: 'LOAD_BACKEND_STATS'; stats: BackendStats }
@@ -149,10 +148,6 @@ const initialState: State = {
   saveError: '',
   backendConfig: null,
   backendStats: null,
-  circuitFailureThreshold: 3,
-  circuitCooldownMinutes: 10,
-  targetTimeoutSeconds: 30,
-  targetMaxRetries: 0,
 };
 
 function normalizeChainModels(models: FailoverChain['models']) {
@@ -169,12 +164,18 @@ function normalizeChainModels(models: FailoverChain['models']) {
 }
 
 function normalizeChain(chain: FailoverChain): FailoverChain {
+  const models = normalizeChainModels(chain.models || []);
+  const firstModel = models[0];
   return {
     ...chain,
     strategy: chain.strategy === 'weighted' ? 'priority' : chain.strategy || 'priority',
     concurrency: Math.max(1, Math.min(64, Math.floor(Number(chain.concurrency) || 1))),
     releaseDelaySeconds: Math.max(0, Math.min(3600, Math.floor(Number(chain.releaseDelaySeconds) || 0))),
-    models: normalizeChainModels(chain.models || []),
+    targetTimeoutSeconds: Math.max(1, Math.floor(Number(chain.targetTimeoutSeconds || firstModel?.timeout) || 30)),
+    targetMaxRetries: Math.max(0, Math.floor(Number(chain.targetMaxRetries ?? firstModel?.maxRetries) || 0)),
+    circuitFailureThreshold: Math.max(1, Math.floor(Number(chain.circuitFailureThreshold) || 3)),
+    circuitCooldownMinutes: Math.max(1, Math.floor(Number(chain.circuitCooldownMinutes) || 10)),
+    models,
   };
 }
 
@@ -187,46 +188,16 @@ function reducer(state: State, action: Action): State {
     case 'SET_ADMIN_TOKEN':
       localStorage.setItem('adminToken', action.token);
       return { ...state, adminToken: action.token };
-    case 'SET_CIRCUIT_SETTINGS':
-      return {
-        ...state,
-        circuitFailureThreshold: Math.max(1, Math.floor(Number(action.failureThreshold) || 3)),
-        circuitCooldownMinutes: Math.max(1, Math.floor(Number(action.cooldownMinutes) || 10)),
-      };
-    case 'SET_TARGET_SETTINGS': {
-      const timeout = Math.max(1, Math.floor(Number(action.timeoutSeconds) || 30));
-      const maxRetries = Math.max(0, Math.floor(Number(action.maxRetries) || 0));
-      return {
-        ...state,
-        targetTimeoutSeconds: timeout,
-        targetMaxRetries: maxRetries,
-        chains: state.chains.map(chain => ({
-          ...chain,
-          models: normalizeChainModels(chain.models.map(model => ({
-            ...model,
-            timeout,
-            maxRetries,
-            weight: 1,
-          }))),
-        })),
-      };
-    }
     case 'SET_SAVE_STATUS':
       return { ...state, saveStatus: action.status, saveError: action.error || '' };
     case 'LOAD_BACKEND_STATE': {
       const mapped = backendToUi(action.config, action.stats || null);
-      const circuitBreaker = action.config.circuitBreaker || defaultConfig.circuitBreaker;
-      const targetSettings = targetSettingsFromConfig(action.config);
       return {
         ...state,
         ...mapped,
         activeThreads: ((action.stats || null)?.activeThreads || []).map(normalizeActiveThread),
         backendConfig: action.config,
         backendStats: action.stats || null,
-        circuitFailureThreshold: Math.max(1, Number(circuitBreaker?.failureThreshold || 3)),
-        circuitCooldownMinutes: Math.max(1, Number(circuitBreaker?.cooldownMinutes || 10)),
-        targetTimeoutSeconds: targetSettings.timeoutSeconds,
-        targetMaxRetries: targetSettings.maxRetries,
         configLoaded: true,
         saveStatus: 'idle',
         saveError: '',
@@ -329,6 +300,15 @@ function normalizeActiveThread(thread: ActiveThread): ActiveThread {
     updatedAt: Number(thread.updatedAt || 0),
     releaseAt: Number(thread.releaseAt || 0),
     failedModels: Array.isArray(thread.failedModels) ? thread.failedModels.map(String) : [],
+    attemptErrors: Array.isArray(thread.attemptErrors)
+      ? thread.attemptErrors.map(item => ({
+          target: String(item.target || ''),
+          attempt: item.attempt === undefined ? undefined : Math.max(0, Math.floor(Number(item.attempt) || 0)),
+          status: item.status === undefined ? undefined : Math.max(0, Math.floor(Number(item.status) || 0)),
+          message: String(item.message || ''),
+          detail: item.detail === undefined ? undefined : String(item.detail || ''),
+        }))
+      : [],
   };
 }
 
@@ -372,6 +352,7 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
 
   const chains: FailoverChain[] = (config.models || []).map((model) => {
     const modelStats = stats?.chains?.[model.publicName];
+    const modelCircuitBreaker = model.circuitBreaker || config.circuitBreaker || defaultConfig.circuitBreaker;
     const totalRequests = modelStats?.requests || 0;
     const totalFinished = (modelStats?.successes || 0) + (modelStats?.failures || 0);
     const successRate = totalFinished ? Number((((modelStats?.successes || 0) / totalFinished) * 100).toFixed(1)) : 100;
@@ -392,6 +373,7 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
         enabled: target.enabled !== false,
       };
     }).sort((a, b) => a.priority - b.priority).map((item, index) => ({ ...item, priority: index + 1 }));
+    const firstTarget = models[0];
 
     return {
       id: uuidv4(),
@@ -403,6 +385,10 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
       proxyApiKey: firstProxyKey,
       concurrency: Math.max(1, Math.min(64, Math.floor(Number(model.concurrency) || 1))),
       releaseDelaySeconds: Math.max(0, Math.min(3600, Math.round(Number(model.releaseDelayMs || 0) / 1000))),
+      targetTimeoutSeconds: Math.max(1, Math.floor(Number(firstTarget?.timeout) || 30)),
+      targetMaxRetries: Math.max(0, Math.floor(Number(firstTarget?.maxRetries) || 0)),
+      circuitFailureThreshold: Math.max(1, Math.floor(Number(modelCircuitBreaker?.failureThreshold) || 3)),
+      circuitCooldownMinutes: Math.max(1, Math.floor(Number(modelCircuitBreaker?.cooldownMinutes) || 10)),
       enabled: model.enabled !== false,
       createdAt: Date.now(),
       totalRequests,
@@ -434,14 +420,6 @@ function uniqueStrings(items: string[]) {
   return [...new Set(items.map(String).filter(Boolean))];
 }
 
-function targetSettingsFromConfig(config: BackendConfig) {
-  const firstTarget = (config.models || []).flatMap(model => model.targets || [])[0];
-  return {
-    timeoutSeconds: Math.max(1, Math.round((firstTarget?.timeoutMs || config.requestTimeoutMs || 30000) / 1000)),
-    maxRetries: Math.max(0, Math.floor(Number(firstTarget?.maxRetries) || 0)),
-  };
-}
-
 function uiToBackend(state: State): BackendConfig {
   const base = state.backendConfig || defaultConfig;
   const keyMap = new Map<string, string>();
@@ -461,6 +439,11 @@ function uiToBackend(state: State): BackendConfig {
     strategy: chain.strategy,
     concurrency: Math.max(1, Math.min(64, Math.floor(Number(chain.concurrency) || 1))),
     releaseDelayMs: Math.max(0, Math.min(3600, Math.floor(Number(chain.releaseDelaySeconds) || 0))) * 1000,
+    circuitBreaker: {
+      failureThreshold: Math.max(1, Math.floor(Number(chain.circuitFailureThreshold) || 3)),
+      cooldownMinutes: Math.max(1, Math.floor(Number(chain.circuitCooldownMinutes) || 10)),
+      immediateCooldownStatusCodes: base.circuitBreaker?.immediateCooldownStatusCodes || [429],
+    },
     targets: [...chain.models]
       .sort((a, b) => a.priority - b.priority)
       .map((model, index) => {
@@ -473,8 +456,8 @@ function uiToBackend(state: State): BackendConfig {
           enabled: model.enabled,
           priority: index + 1,
           weight: 1,
-          maxRetries: Math.max(0, Math.floor(Number(state.targetMaxRetries) || 0)),
-          timeoutMs: Math.max(1, Math.floor(Number(state.targetTimeoutSeconds) || 30)) * 1000,
+          maxRetries: Math.max(0, Math.floor(Number(chain.targetMaxRetries ?? model.maxRetries) || 0)),
+          timeoutMs: Math.max(1, Math.floor(Number(chain.targetTimeoutSeconds || model.timeout) || 30)) * 1000,
         };
       })
       .filter(target => target.baseUrl && target.apiKey && target.modelName),
@@ -492,11 +475,7 @@ function uiToBackend(state: State): BackendConfig {
     ...base,
     adminToken: state.adminToken || base.adminToken || 'admin',
     proxyKeys: proxyKeys.length ? proxyKeys : base.proxyKeys,
-    circuitBreaker: {
-      failureThreshold: Math.max(1, Math.floor(Number(state.circuitFailureThreshold) || 3)),
-      cooldownMinutes: Math.max(1, Math.floor(Number(state.circuitCooldownMinutes) || 10)),
-      immediateCooldownStatusCodes: base.circuitBreaker?.immediateCooldownStatusCodes || [429],
-    },
+    circuitBreaker: base.circuitBreaker || defaultConfig.circuitBreaker,
     providers,
     models,
   };

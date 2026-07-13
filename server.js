@@ -1,4 +1,4 @@
-import http from "node:http";
+﻿import http from "node:http";
 import { readFile, writeFile, mkdir, stat, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,6 +167,7 @@ function normalizeModelConfig(model) {
   normalized.strategy = validStrategies.has(normalized.strategy) ? normalized.strategy : "priority";
   normalized.concurrency = Math.max(1, Math.min(64, Math.floor(Number(normalized.concurrency) || 1)));
   normalized.releaseDelayMs = Math.max(0, Math.min(3600000, Math.floor(Number(normalized.releaseDelayMs) || 0)));
+  normalized.circuitBreaker = normalizeCircuitBreaker(normalized.circuitBreaker);
   normalized.targets = normalizeTargetQueue(normalized.targets);
   return normalized;
 }
@@ -362,9 +363,10 @@ function targetKey(model, target) {
 
 function recordTarget(model, target, ok, cfg, failure = {}, latencyMs = 0) {
   const key = targetKey(model, target);
-  const failureThreshold = cfg?.circuitBreaker?.failureThreshold || defaultConfig.circuitBreaker.failureThreshold;
-  const cooldownMs = (cfg?.circuitBreaker?.cooldownMinutes || defaultConfig.circuitBreaker.cooldownMinutes) * 60 * 1000;
-  const immediateCooldownStatusCodes = cfg?.circuitBreaker?.immediateCooldownStatusCodes || defaultConfig.circuitBreaker.immediateCooldownStatusCodes;
+  const breakerConfig = modelCircuitBreaker(model, cfg);
+  const failureThreshold = breakerConfig.failureThreshold;
+  const cooldownMs = breakerConfig.cooldownMinutes * 60 * 1000;
+  const immediateCooldownStatusCodes = breakerConfig.immediateCooldownStatusCodes;
   stats.targets[key] ||= {
     model: model.publicName,
     target: target.name || target.modelName || target.baseUrl,
@@ -412,6 +414,13 @@ function recordTargetFailure(model, target, cfg, failure, latencyMs = 0) {
     stats.targets[key].lastStatus = Number(failure?.status || 0);
     stats.targets[key].lastError = failure?.message || failure?.body || "";
   }
+}
+
+function modelCircuitBreaker(model, cfg) {
+  return normalizeCircuitBreaker({
+    ...(cfg?.circuitBreaker || defaultConfig.circuitBreaker),
+    ...(model?.circuitBreaker || {})
+  });
 }
 
 function upstreamUrl(target, pathname) {
@@ -830,7 +839,7 @@ function resultFromError(capability, err) {
   return {
     capability,
     status: "failed",
-    detail: err.name === "AbortError" ? "请求超时" : (err.message || "请求失败"),
+    detail: err.name === "AbortError" ? "Request timed out" : (err.message || "Request failed"),
     evidence: err.body || ""
   };
 }
@@ -977,7 +986,7 @@ async function testTextCompletion(target) {
       status: passed ? "passed" : "failed",
       latencyMs: Date.now() - startedAt,
       usage: usageFromPayload(payload),
-      detail: passed ? "HTTP 200 且 choices[0].message.content 非空" : "HTTP 200 但没有返回非空文本内容",
+      detail: passed ? "HTTP 200 and choices[0].message.content is non-empty" : "HTTP 200 but no non-empty text content was returned",
       evidence: trimError(text)
     };
   } catch (err) {
@@ -992,18 +1001,18 @@ async function testToolCalling(target) {
       temperature: 0,
       max_tokens: 80,
       messages: [
-        { role: "user", content: "调用天气工具查询东京的天气。" }
+        { role: "user", content: "Call the weather tool to check the weather in Tokyo." }
       ],
       tools: [
         {
           type: "function",
           function: {
             name: "get_current_weather",
-            description: "查询指定城市的天气",
+            description: "Get weather for a city",
             parameters: {
               type: "object",
               properties: {
-                location: { type: "string", description: "城市名称" }
+                location: { type: "string", description: "City name" }
               },
               required: ["location"]
             }
@@ -1017,7 +1026,7 @@ async function testToolCalling(target) {
     const matched = calls.some((call) => {
       const fn = call.function || call;
       const args = typeof fn.arguments === "string" ? parseJsonSafe(fn.arguments) : fn.arguments;
-      return fn.name === "get_current_weather" && String(args?.location || "").includes("东京");
+      return fn.name === "get_current_weather" && /tokyo/i.test(String(args?.location || ""));
     });
     const toolFinish = finishReason === "tool_calls" || finishReason === "function_call";
     return {
@@ -1026,10 +1035,10 @@ async function testToolCalling(target) {
       latencyMs: Date.now() - startedAt,
       usage: usageFromPayload(payload),
       detail: matched && toolFinish
-        ? "HTTP 200，finish_reason 为 tool_calls/function_call，且包含正确工具名和参数"
+        ? "HTTP 200, finish_reason is tool_calls/function_call, and tool name/arguments matched"
         : calls.length
-          ? "返回了工具调用字段，但 finish_reason 或参数不完全符合预期"
-          : "未返回 tool_calls/function_call，可能降级为普通文本或不支持 tools",
+          ? "Tool-call fields were returned, but finish_reason or arguments did not fully match"
+          : "No tool_calls/function_call returned; it may have degraded to plain text or not support tools",
       evidence: trimError(text)
     };
   } catch (err) {
@@ -1052,7 +1061,7 @@ async function testVision(target) {
         {
           role: "user",
           content: [
-            { type: "text", text: "图里的数字是多少？只回答数字。" },
+            { type: "text", text: "What number is in the image? Answer with digits only." },
             { type: "image_url", image_url: { url: visionTestImageDataUrl() } }
           ]
         }
@@ -1061,19 +1070,19 @@ async function testVision(target) {
     const content = assistantText(payload).trim();
     const hasText = content.length > 0;
     const identified = content.includes("9527");
-    const refusal = /cannot|can't|unable|image|vision|无法|不能|看不到|无法查看/.test(content.toLowerCase());
+    const refusal = /cannot|can't|unable|image|vision|i can't see|i cannot see/.test(content.toLowerCase());
     return {
       capability: "vision",
       status: identified ? "passed" : hasText && !refusal ? "uncertain" : "failed",
       latencyMs: Date.now() - startedAt,
       usage: usageFromPayload(payload),
       detail: identified
-        ? "HTTP 200，接口接受 image_url，并正确识别图片数字 9527"
+        ? "HTTP 200, image_url was accepted, and the image number 9527 was identified"
         : hasText && !refusal
-          ? "HTTP 200 且有文本回复，但未识别出 9527，可能静默忽略图片或视觉能力不稳定"
+          ? "HTTP 200 and text was returned, but 9527 was not identified; the image may have been ignored or vision is unstable"
         : refusal
-          ? "模型表示无法读取图片"
-          : "HTTP 200 但没有返回可读文本",
+          ? "The model indicated that it cannot read the image"
+          : "HTTP 200 but no readable text was returned",
       evidence: trimError(text)
     };
   } catch (err) {
@@ -1207,7 +1216,8 @@ function proxyThreadSnapshot(thread) {
     startedAt: thread.startedAt,
     updatedAt: thread.updatedAt,
     releaseAt: thread.releaseAt || 0,
-    failedModels: thread.failedModels || []
+    failedModels: thread.failedModels || [],
+    attemptErrors: thread.attemptErrors || []
   };
 }
 
@@ -1225,10 +1235,11 @@ function createProxyThread(state, model, requestedModel) {
     chainName: model.publicName || "",
     requestedModel: requestedModel || model.publicName || "",
     phase: "starting",
-    status: "线程已创建，等待尝试目标模型",
+    status: "Thread created, waiting to try target model",
     startedAt: Date.now(),
     updatedAt: Date.now(),
-    failedModels: []
+    failedModels: [],
+    attemptErrors: []
   };
   activeProxyThreads.set(thread.id, thread);
   return thread;
@@ -1237,6 +1248,20 @@ function createProxyThread(state, model, requestedModel) {
 function updateProxyThread(thread, updates) {
   if (!thread || !activeProxyThreads.has(thread.id)) return;
   Object.assign(thread, updates, { updatedAt: Date.now() });
+}
+
+function appendProxyThreadError(thread, item) {
+  if (!thread || !activeProxyThreads.has(thread.id)) return;
+  const nextError = {
+    target: String(item.target || ""),
+    attempt: item.attempt === undefined ? undefined : Number(item.attempt) || 0,
+    status: item.status === undefined ? undefined : Number(item.status) || 0,
+    message: String(item.message || item.body || "unknown error"),
+    detail: item.detail === undefined ? item.body : item.detail
+  };
+  updateProxyThread(thread, {
+    attemptErrors: [...(thread.attemptErrors || []), nextError]
+  });
 }
 
 function makeProxySlotRelease(state, thread) {
@@ -1248,7 +1273,7 @@ function makeProxySlotRelease(state, thread) {
     if (releaseDelayMs > 0) {
       updateProxyThread(thread, {
         phase: "release-wait",
-        status: `请求已结束，等待 ${Math.ceil(releaseDelayMs / 1000)} 秒释放线程`,
+        status: `Request finished, releasing thread after ${Math.ceil(releaseDelayMs / 1000)}s`,
         releaseAt: Date.now() + releaseDelayMs
       });
       const timer = setTimeout(() => {
@@ -1354,6 +1379,10 @@ async function handleProxy(req, res, pathname, cfg) {
 
   for (const target of targets) {
     if (isCircuitOpen(model, target)) {
+      appendProxyThreadError(proxyThread, {
+        target: targetLabel(target),
+        message: "circuit open"
+      });
       updateProxyThread(proxyThread, {
         targetName: target.name || "",
         targetModel: target.modelName || "",
@@ -1361,7 +1390,7 @@ async function handleProxy(req, res, pathname, cfg) {
         attempt: 0,
         maxAttempts: 0,
         phase: "skipped",
-        status: "目标模型处于熔断状态，已跳过",
+        status: "Target is in circuit-open state, skipped",
         failedModels: [...failedModels, targetLabel(target)]
       });
       errors.push({ target: target.name, message: "circuit open" });
@@ -1373,6 +1402,11 @@ async function handleProxy(req, res, pathname, cfg) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (isCircuitOpen(model, target)) {
+        appendProxyThreadError(proxyThread, {
+          target: targetLabel(target),
+          attempt,
+          message: "circuit open"
+        });
         updateProxyThread(proxyThread, {
           targetName: target.name || "",
           targetModel: target.modelName || "",
@@ -1380,7 +1414,7 @@ async function handleProxy(req, res, pathname, cfg) {
           attempt,
           maxAttempts,
           phase: "skipped",
-          status: "目标模型在重试前进入熔断，已跳过",
+          status: "Target entered circuit-open state before retry, skipped",
           failedModels: [...failedModels, targetLabel(target)]
         });
         errors.push({ target: target.name, attempt, message: "circuit open" });
@@ -1398,21 +1432,26 @@ async function handleProxy(req, res, pathname, cfg) {
         attempt,
         maxAttempts,
         phase: "calling",
-        status: `正在尝试 ${targetLabel(target)} (#${attempt}/${maxAttempts})`,
+        status: `Calling ${targetLabel(target)} (#${attempt}/${maxAttempts})`,
         failedModels: [...failedModels]
       });
       try {
         upstream = await callTarget(req, pathname, body, model, target, cfg);
       } catch (err) {
         const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+        appendProxyThreadError(proxyThread, {
+          target: targetLabel(target),
+          attempt,
+          message: failure.message
+        });
         updateProxyThread(proxyThread, {
-          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
-          status: `${targetLabel(target)} 请求失败：${failure.message}`,
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts, model) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} request failed: ${failure.message}`,
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, message: failure.message });
-        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         break;
       }
@@ -1425,19 +1464,26 @@ async function handleProxy(req, res, pathname, cfg) {
           message: `Upstream returned ${upstream.status}`,
           body: trimError(text)
         };
+        appendProxyThreadError(proxyThread, {
+          target: targetLabel(target),
+          attempt,
+          status: failure.status || upstream.status,
+          message: failure.message || `Upstream returned ${upstream.status}`,
+          detail: failure.body || trimError(text)
+        });
         updateProxyThread(proxyThread, {
-          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
-          status: `${targetLabel(target)} 返回 ${failure.status || upstream.status}`,
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts, model) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} returned ${failure.status || upstream.status}`,
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, status: failure.status || upstream.status, body: failure.body || failure.message });
-        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         if (shouldTryNext(failure.status || upstream.status, cfg)) break;
         updateProxyThread(proxyThread, {
           phase: "failed",
-          status: failure.message || `请求失败：${upstream.status}`,
+          status: failure.message || `Request failed: ${upstream.status}`,
           failedModels
         });
         stats.failures += 1;
@@ -1459,14 +1505,21 @@ async function handleProxy(req, res, pathname, cfg) {
         const text = await upstream.text().catch(() => "");
         const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
         if (failure) {
+          appendProxyThreadError(proxyThread, {
+            target: targetLabel(target),
+            attempt,
+            status: failure.status,
+            message: failure.message,
+            detail: failure.body
+          });
           updateProxyThread(proxyThread, {
-            phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
-            status: `${targetLabel(target)} 响应内容判定失败：${failure.message}`,
+            phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts, model) ? "retrying" : "failed-target",
+            status: `${targetLabel(target)} response content failed validation: ${failure.message}`,
             failedModels: [...failedModels]
           });
           recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
           errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
-          if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+          if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
           failedModels.push(targetLabel(target));
           if (shouldTryNext(failure.status, cfg)) break;
           updateProxyThread(proxyThread, {
@@ -1492,7 +1545,7 @@ async function handleProxy(req, res, pathname, cfg) {
         recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
         updateProxyThread(proxyThread, {
           phase: "completed",
-          status: `已由 ${targetLabel(target)} 返回非流式响应`,
+          status: `Completed non-stream response from ${targetLabel(target)}`,
           failedModels
         });
         stats.successes += 1;
@@ -1526,14 +1579,19 @@ async function handleProxy(req, res, pathname, cfg) {
         inspected = await inspectInitialStream(upstream);
       } catch (err) {
         const failure = { message: err.name === "AbortError" ? "timeout" : err.message };
+        appendProxyThreadError(proxyThread, {
+          target: targetLabel(target),
+          attempt,
+          message: failure.message
+        });
         updateProxyThread(proxyThread, {
-          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
-          status: `${targetLabel(target)} 流式响应探测失败：${failure.message}`,
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts, model) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} stream inspection failed: ${failure.message}`,
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, message: failure.message });
-        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         break;
       }
@@ -1541,14 +1599,21 @@ async function handleProxy(req, res, pathname, cfg) {
       if (inspected.failure) {
         await inspected.reader?.cancel().catch(() => undefined);
         const failure = inspected.failure;
+        appendProxyThreadError(proxyThread, {
+          target: targetLabel(target),
+          attempt,
+          status: failure.status,
+          message: failure.message,
+          detail: failure.body
+        });
         updateProxyThread(proxyThread, {
-          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts) ? "retrying" : "failed-target",
-          status: `${targetLabel(target)} 初始流返回失败：${failure.message}`,
+          phase: shouldRetryTarget(failure, cfg, attempt, maxAttempts, model) ? "retrying" : "failed-target",
+          status: `${targetLabel(target)} initial stream failed: ${failure.message}`,
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
         errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
-        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts)) continue;
+        if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         if (shouldTryNext(failure.status, cfg)) break;
         updateProxyThread(proxyThread, {
@@ -1581,7 +1646,7 @@ async function handleProxy(req, res, pathname, cfg) {
       res.writeHead(upstream.status, headers);
       updateProxyThread(proxyThread, {
         phase: "streaming",
-        status: `正在转发 ${targetLabel(target)} 的流式响应`,
+        status: `Forwarding stream response from ${targetLabel(target)}`,
         failedModels
       });
 
@@ -1590,7 +1655,7 @@ async function handleProxy(req, res, pathname, cfg) {
         recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
         updateProxyThread(proxyThread, {
           phase: "completed",
-          status: `已由 ${targetLabel(target)} 返回空流响应`,
+          status: `Completed empty stream response from ${targetLabel(target)}`,
           failedModels
         });
         stats.successes += 1;
@@ -1636,9 +1701,16 @@ async function handleProxy(req, res, pathname, cfg) {
         res.end();
         if (streamFailure) {
           recordTargetFailure(model, target, cfg, streamFailure, Date.now() - targetStartedAt);
+          appendProxyThreadError(proxyThread, {
+            target: targetLabel(target),
+            attempt,
+            status: streamFailure.status,
+            message: streamFailure.message,
+            detail: streamFailure.body
+          });
           updateProxyThread(proxyThread, {
             phase: "failed",
-            status: `流式响应中检测到失败：${streamFailure.message}`,
+            status: `Detected failure in stream response: ${streamFailure.message}`,
             failedModels: [...failedModels, targetLabel(target)]
           });
           stats.failures += 1;
@@ -1659,7 +1731,7 @@ async function handleProxy(req, res, pathname, cfg) {
         recordTarget(model, target, true, cfg, {}, Date.now() - targetStartedAt);
         updateProxyThread(proxyThread, {
           phase: "completed",
-          status: `已完成 ${targetLabel(target)} 的流式响应`,
+          status: `Completed stream response from ${targetLabel(target)}`,
           failedModels
         });
         stats.successes += 1;
@@ -1678,9 +1750,14 @@ async function handleProxy(req, res, pathname, cfg) {
           error: errors.length ? errors.map(formatAttemptError).join(", ") : ""
         });
       } catch (err) {
+        appendProxyThreadError(proxyThread, {
+          target: targetLabel(target),
+          attempt,
+          message: err.message
+        });
         updateProxyThread(proxyThread, {
           phase: "failed",
-          status: `客户端连接或流转发失败：${err.message}`,
+          status: `Client connection or stream forwarding failed: ${err.message}`,
           failedModels
         });
         res.destroy(err);
@@ -1693,7 +1770,7 @@ async function handleProxy(req, res, pathname, cfg) {
   chain.failures += 1;
   updateProxyThread(proxyThread, {
     phase: "failed",
-    status: "所有配置的目标模型均失败",
+    status: "All configured target models failed",
     failedModels
   });
   addLog({
@@ -1720,10 +1797,10 @@ function formatAttemptError(item) {
   return `${item.target || "target"}${suffix}: ${item.status || item.message}`;
 }
 
-function shouldRetryTarget(failure, cfg, attempt, maxAttempts) {
+function shouldRetryTarget(failure, cfg, attempt, maxAttempts, model = null) {
   if (attempt >= maxAttempts) return false;
   const status = Number(failure?.status || 0);
-  const immediateCooldownStatusCodes = cfg?.circuitBreaker?.immediateCooldownStatusCodes || defaultConfig.circuitBreaker.immediateCooldownStatusCodes;
+  const immediateCooldownStatusCodes = modelCircuitBreaker(model, cfg).immediateCooldownStatusCodes;
   if (immediateCooldownStatusCodes.includes(status)) return false;
   if (!status) return true;
   return status >= 500 || status === 408 || status === 409;
@@ -1904,3 +1981,4 @@ server.listen(port, host, () => {
   console.log(`Admin UI: http://127.0.0.1:${port}`);
   console.log(`Config: ${configPath}`);
 });
+

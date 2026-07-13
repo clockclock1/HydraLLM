@@ -98,6 +98,27 @@ function ThreadCard({ thread, now }: { thread: ActiveThread; now: number }) {
           ))}
         </div>
       )}
+
+      {thread.attemptErrors.length > 0 && (
+        <div className="mt-4 rounded-lg border border-red-100 bg-red-50/60 p-3">
+          <p className="text-xs font-semibold text-red-700">转移原因</p>
+          <div className="mt-2 space-y-2">
+            {thread.attemptErrors.map((item, index) => (
+              <div key={`${item.target}-${item.attempt || 0}-${index}`} className="rounded-md bg-white px-3 py-2 text-xs text-red-700">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono font-semibold">{item.target || 'target'}</span>
+                  {item.attempt !== undefined && <span className="text-red-400">#{item.attempt}</span>}
+                  {item.status ? <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono">{item.status}</span> : null}
+                </div>
+                <p className="mt-1 break-words text-red-600">{item.message}</p>
+                {item.detail && item.detail !== item.message && (
+                  <p className="mt-1 line-clamp-2 break-words font-mono text-[11px] text-red-400">{item.detail}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

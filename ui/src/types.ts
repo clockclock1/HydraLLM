@@ -29,6 +29,10 @@ export interface FailoverChain {
   proxyApiKey: string;
   concurrency: number;
   releaseDelaySeconds: number;
+  targetTimeoutSeconds: number;
+  targetMaxRetries: number;
+  circuitFailureThreshold: number;
+  circuitCooldownMinutes: number;
   enabled: boolean;
   createdAt: number;
   totalRequests: number;
@@ -36,7 +40,7 @@ export interface FailoverChain {
   successRate: number;
 }
 
-export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'endpoints' | 'live-status' | 'logs' | 'settings';
+export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'endpoints' | 'live-status' | 'logs';
 
 export interface ActiveThread {
   id: string;
@@ -54,6 +58,13 @@ export interface ActiveThread {
   updatedAt: number;
   releaseAt: number;
   failedModels: string[];
+  attemptErrors: Array<{
+    target: string;
+    attempt?: number;
+    status?: number;
+    message: string;
+    detail?: string;
+  }>;
 }
 
 export interface LogEntry {

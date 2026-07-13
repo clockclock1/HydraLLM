@@ -16,6 +16,9 @@ import {
   ArrowRight,
   Gauge,
   Zap,
+  Timer,
+  RotateCcw,
+  ShieldAlert,
 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useStore } from '../store';
@@ -73,6 +76,10 @@ function ChainEditor({
   const [proxyApiKey, setProxyApiKey] = useState(chain?.proxyApiKey || 'fpk-' + uuidv4().slice(0, 24));
   const [concurrency, setConcurrency] = useState(chain?.concurrency || 1);
   const [releaseDelaySeconds, setReleaseDelaySeconds] = useState(chain?.releaseDelaySeconds || 0);
+  const [targetTimeoutSeconds, setTargetTimeoutSeconds] = useState(chain?.targetTimeoutSeconds || chain?.models?.[0]?.timeout || 30);
+  const [targetMaxRetries, setTargetMaxRetries] = useState(chain?.targetMaxRetries ?? chain?.models?.[0]?.maxRetries ?? 0);
+  const [circuitFailureThreshold, setCircuitFailureThreshold] = useState(chain?.circuitFailureThreshold || 3);
+  const [circuitCooldownMinutes, setCircuitCooldownMinutes] = useState(chain?.circuitCooldownMinutes || 10);
   const [models, setModels] = useState<FailoverModel[]>(() => normalizeQueue(chain?.models || []));
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -179,7 +186,15 @@ function ChainEditor({
   };
 
   const handleSave = () => {
-    const nextModels = normalizeQueue(models);
+    const timeout = Math.max(1, Math.min(3600, Math.floor(Number(targetTimeoutSeconds) || 30)));
+    const maxRetries = Math.max(0, Math.min(20, Math.floor(Number(targetMaxRetries) || 0)));
+    const failureThreshold = Math.max(1, Math.min(100, Math.floor(Number(circuitFailureThreshold) || 3)));
+    const cooldownMinutes = Math.max(1, Math.min(1440, Math.floor(Number(circuitCooldownMinutes) || 10)));
+    const nextModels = normalizeQueue(models).map(model => ({
+      ...model,
+      timeout,
+      maxRetries,
+    }));
     if (!name || !proxyModelName || nextModels.length === 0) return;
     onSave({
       id: chain?.id || uuidv4(),
@@ -190,6 +205,10 @@ function ChainEditor({
       proxyApiKey,
       concurrency: Math.max(1, Math.min(64, Math.floor(Number(concurrency) || 1))),
       releaseDelaySeconds: Math.max(0, Math.min(3600, Math.floor(Number(releaseDelaySeconds) || 0))),
+      targetTimeoutSeconds: timeout,
+      targetMaxRetries: maxRetries,
+      circuitFailureThreshold: failureThreshold,
+      circuitCooldownMinutes: cooldownMinutes,
       models: nextModels,
       enabled: chain?.enabled ?? true,
       createdAt: chain?.createdAt || Date.now(),
@@ -292,6 +311,79 @@ function ChainEditor({
                   max={3600}
                   value={releaseDelaySeconds}
                   onChange={event => setReleaseDelaySeconds(Math.max(0, Math.min(3600, Number(event.target.value) || 0)))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-white p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">链路队列设置</h4>
+                <p className="mt-1 text-xs leading-5 text-slate-500">只应用到当前故障转移链的目标请求。</p>
+              </div>
+            </div>
+            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-500">
+                  <Timer size={12} /> 超时(秒)
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={targetTimeoutSeconds}
+                  onChange={event => setTargetTimeoutSeconds(Math.max(1, Math.min(3600, Number(event.target.value) || 30)))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-500">
+                  <RotateCcw size={12} /> 最大重试
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={20}
+                  value={targetMaxRetries}
+                  onChange={event => setTargetMaxRetries(Math.max(0, Math.min(20, Number(event.target.value) || 0)))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-white p-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600">
+                <ShieldAlert size={16} />
+              </div>
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">链路熔断保护</h4>
+                <p className="mt-1 text-xs leading-5 text-slate-500">只应用到当前故障转移链，避免持续命中不可用上游。</p>
+              </div>
+            </div>
+            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-500">连续失败次数</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={circuitFailureThreshold}
+                  onChange={event => setCircuitFailureThreshold(Math.max(1, Math.min(100, Number(event.target.value) || 3)))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-500">禁用分钟数</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={circuitCooldownMinutes}
+                  onChange={event => setCircuitCooldownMinutes(Math.max(1, Math.min(1440, Number(event.target.value) || 10)))}
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
                 />
               </label>
@@ -603,6 +695,18 @@ export default function FailoverChains() {
                       <span className="text-slate-500">并发：</span>
                       <code className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-600 font-mono text-xs">
                         {chain.concurrency || 1} 线程 / 延迟 {chain.releaseDelaySeconds || 0}s
+                      </code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500">队列：</span>
+                      <code className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-600 font-mono text-xs">
+                        T:{chain.targetTimeoutSeconds || chain.models[0]?.timeout || 30}s / R:{chain.targetMaxRetries ?? chain.models[0]?.maxRetries ?? 0}
+                      </code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500">熔断：</span>
+                      <code className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-600 font-mono text-xs">
+                        F:{chain.circuitFailureThreshold || 3} / C:{chain.circuitCooldownMinutes || 10}m
                       </code>
                     </div>
                   </div>

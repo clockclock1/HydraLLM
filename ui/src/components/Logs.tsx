@@ -6,6 +6,7 @@ import {
   Filter,
 
   AlertTriangle,
+  X,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { cn } from '../utils/cn';
@@ -15,6 +16,7 @@ export default function Logs() {
   const { state } = useStore();
   const [filterStatus, setFilterStatus] = useState<'all' | 'success' | 'failed'>('all');
   const [filterChain, setFilterChain] = useState<string>('all');
+  const [selectedError, setSelectedError] = useState<{ title: string; message: string } | null>(null);
 
   const filteredLogs = state.logs.filter(log => {
     if (filterStatus !== 'all' && log.status !== filterStatus) return false;
@@ -149,8 +151,22 @@ export default function Logs() {
                         {log.latency >= 1000 ? (log.latency / 1000).toFixed(1) + 's' : log.latency + 'ms'}
                       </span>
                     </td>
-                    <td className="px-5 py-3 text-xs text-slate-500 max-w-[200px] truncate" title={log.error}>
-                      {log.error || '-'}
+                    <td className="px-5 py-3 text-xs text-slate-500 max-w-[220px]">
+                      {log.error ? (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedError({
+                            title: `${log.chainName} / ${log.originalModel}`,
+                            message: log.error || '',
+                          })}
+                          className="block max-w-[220px] truncate text-left text-blue-600 hover:text-blue-700 hover:underline"
+                          title="查看完整错误"
+                        >
+                          {log.error}
+                        </button>
+                      ) : (
+                        '-'
+                      )}
                     </td>
                   </tr>
                 );
@@ -166,6 +182,31 @@ export default function Logs() {
           )}
         </div>
       </div>
+
+      {selectedError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setSelectedError(null)}>
+          <div className="w-full max-w-2xl rounded-xl bg-white shadow-2xl" onClick={event => event.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+              <div>
+                <h3 className="font-semibold text-slate-800">完整错误信息</h3>
+                <p className="mt-0.5 text-xs text-slate-400">{selectedError.title}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedError(null)}
+                className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="max-h-[55vh] overflow-auto p-5">
+              <pre className="whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-4 text-xs leading-5 text-slate-100">
+                {selectedError.message}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

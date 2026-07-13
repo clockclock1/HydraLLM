@@ -7,7 +7,6 @@ import FailoverChains from './components/FailoverChains';
 import ProxyEndpoints from './components/ProxyEndpoints';
 import LiveStatus from './components/LiveStatus';
 import Logs from './components/Logs';
-import Settings from './components/Settings';
 
 function PageContent() {
   const { state } = useStore();
@@ -20,7 +19,6 @@ function PageContent() {
     endpoints: <ProxyEndpoints />,
     'live-status': <LiveStatus />,
     logs: <Logs />,
-    settings: <Settings />,
   };
 
   return pages[state.currentPage] || <Dashboard />;
