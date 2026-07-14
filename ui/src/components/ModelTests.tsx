@@ -172,7 +172,7 @@ export default function ModelTests() {
         <button
           onClick={runTests}
           disabled={running || !selectedTargets.length || !selectedCapabilities.length}
-          className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-cyan-200 transition-colors hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-cyan-200 transition-colors hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
         >
           {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
           开始测试 {selectedTargets.length ? `(${selectedTargets.length})` : ''}
@@ -186,7 +186,7 @@ export default function ModelTests() {
               <h3 className="font-semibold text-slate-800">测试项目</h3>
               <span className="text-xs text-slate-400">已选 {capabilities.size} 项</span>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(Object.keys(capabilityMeta) as ModelCapability[]).map(capability => {
                 const active = capabilities.has(capability);
                 return (

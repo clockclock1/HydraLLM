@@ -87,7 +87,7 @@ export default function Logs() {
       {/* Log Table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[920px] text-sm">
             <thead>
               <tr className="bg-slate-50 text-slate-500 text-xs">
                 <th className="text-left px-5 py-3 font-medium">时间</th>
@@ -184,7 +184,7 @@ export default function Logs() {
       </div>
 
       {selectedError && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setSelectedError(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-2 sm:p-4" onClick={() => setSelectedError(null)}>
           <div className="w-full max-w-2xl rounded-xl bg-white shadow-2xl" onClick={event => event.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
               <div>
@@ -199,7 +199,7 @@ export default function Logs() {
                 <X size={18} />
               </button>
             </div>
-            <div className="max-h-[55vh] overflow-auto p-5">
+            <div className="max-h-[65dvh] overflow-auto p-3 sm:p-5">
               <pre className="whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-4 text-xs leading-5 text-slate-100">
                 {selectedError.message}
               </pre>

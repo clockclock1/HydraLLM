@@ -50,15 +50,15 @@ function ProviderModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-lg shadow-2xl max-h-[94dvh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
           <h3 className="font-semibold text-slate-800">{provider ? '编辑提供商' : '添加提供商'}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
             <X size={20} />
           </button>
         </div>
-        <div className="p-6 space-y-4">
+        <div className="p-4 sm:p-6 space-y-4 overflow-auto">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">提供商名称</label>
             <div className="relative">
@@ -97,7 +97,7 @@ function ProviderModal({
             </div>
           </div>
         </div>
-        <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
+        <div className="px-4 py-3 sm:px-6 sm:py-4 border-t border-slate-100 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
             取消
           </button>
@@ -161,8 +161,8 @@ function FetchModelsModal({
   );
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-2xl shadow-2xl max-h-[94dvh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
           <div>
             <h3 className="font-semibold text-slate-800">拉取模型列表</h3>
@@ -173,11 +173,11 @@ function FetchModelsModal({
           </button>
         </div>
 
-        <div className="p-6 space-y-4 flex-1 overflow-auto">
+        <div className="p-4 sm:p-6 space-y-4 flex-1 overflow-auto">
           {/* URL Input */}
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">模型列表 URL</label>
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <div className="relative flex-1">
                 <Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
@@ -190,7 +190,7 @@ function FetchModelsModal({
               <button
                 onClick={fetchModels}
                 disabled={loading}
-                className="px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center gap-2 text-sm flex-shrink-0"
+                className="px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm flex-shrink-0"
               >
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
                 拉取
@@ -239,11 +239,11 @@ function FetchModelsModal({
                       key={model}
                       onClick={() => toggleModel(model)}
                       className={cn(
-                        'w-full flex items-center justify-between px-4 py-2.5 text-sm border-b border-slate-50 last:border-b-0 transition-colors',
+                        'w-full flex items-center justify-between gap-3 px-3 sm:px-4 py-2.5 text-sm border-b border-slate-50 last:border-b-0 transition-colors',
                         isSelected ? 'bg-blue-50' : 'hover:bg-slate-50'
                       )}
                     >
-                      <div className="flex items-center gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
                         <div className={cn(
                           'w-5 h-5 rounded border-2 flex items-center justify-center transition-all',
                           isSelected
@@ -252,7 +252,7 @@ function FetchModelsModal({
                         )}>
                           {isSelected && <Check size={12} className="text-white" />}
                         </div>
-                        <span className={cn('font-mono', isSelected ? 'text-blue-700' : 'text-slate-700')}>
+                        <span className={cn('truncate font-mono', isSelected ? 'text-blue-700' : 'text-slate-700')}>
                           {model}
                         </span>
                       </div>
@@ -274,7 +274,7 @@ function FetchModelsModal({
           )}
         </div>
 
-        <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
+        <div className="px-4 py-3 sm:px-6 sm:py-4 border-t border-slate-100 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
             取消
           </button>
@@ -326,7 +326,7 @@ export default function Providers() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-800">模型提供商</h2>
           <p className="text-slate-500 mt-1">管理 API 提供商及其模型列表</p>
@@ -344,9 +344,9 @@ export default function Providers() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {state.providers.map(provider => (
           <div key={provider.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
-            <div className="px-5 py-4 border-b border-slate-100">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
+            <div className="px-4 py-4 sm:px-5 border-b border-slate-100">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
                   <div className={cn(
                     'w-10 h-10 rounded-lg flex items-center justify-center',
                     provider.status === 'online' ? 'bg-emerald-50' :
@@ -357,9 +357,9 @@ export default function Providers() {
                       provider.status === 'offline' ? 'text-red-500' : 'text-slate-400'
                     )} />
                   </div>
-                  <div>
-                    <h4 className="font-semibold text-slate-800">{provider.name}</h4>
-                    <p className="text-xs text-slate-400 font-mono">{provider.baseUrl}</p>
+                  <div className="min-w-0">
+                    <h4 className="truncate font-semibold text-slate-800">{provider.name}</h4>
+                    <p className="truncate text-xs text-slate-400 font-mono">{provider.baseUrl}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
@@ -388,7 +388,7 @@ export default function Providers() {
               </div>
             </div>
 
-            <div className="px-5 py-3">
+            <div className="px-4 py-3 sm:px-5">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm text-slate-600">状态</span>
                 <div className="flex items-center gap-2">
@@ -424,7 +424,7 @@ export default function Providers() {
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {provider.models.map(model => (
-                  <span key={model} className="text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-md font-mono">
+                  <span key={model} className="inline-block max-w-full truncate text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-md font-mono">
                     {model}
                   </span>
                 ))}

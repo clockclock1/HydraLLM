@@ -115,7 +115,7 @@ export default function Dashboard() {
           </div>
           <div className="max-h-[430px] divide-y divide-slate-50 overflow-auto">
             {state.providers.map((provider, index) => (
-              <div key={provider.id} className="table-row-motion flex items-center justify-between gap-4 px-5 py-3 hover:bg-slate-50" style={{ animationDelay: `${index * 25}ms` }}>
+              <div key={provider.id} className="table-row-motion flex flex-col items-start gap-3 px-5 py-3 hover:bg-slate-50 sm:flex-row sm:items-center sm:justify-between sm:gap-4" style={{ animationDelay: `${index * 25}ms` }}>
                 <div className="flex min-w-0 items-center gap-3">
                   <div className={cn(
                     'h-2.5 w-2.5 shrink-0 rounded-full',
@@ -223,7 +223,7 @@ export default function Dashboard() {
           <h3 className="font-semibold text-slate-800">最近请求日志</h3>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[760px] text-sm">
             <thead>
               <tr className="bg-slate-50 text-slate-500">
                 <th className="px-5 py-2.5 text-left font-medium">时间</th>

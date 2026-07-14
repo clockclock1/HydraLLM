@@ -60,7 +60,7 @@ function ChannelBlock({ channel, index }: { channel: ChannelModelStats; index: n
       </div>
 
       <div className="max-h-[520px] overflow-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[720px] text-sm">
           <thead className="sticky top-0 z-10 bg-white text-xs text-slate-500 shadow-[0_1px_0_#e2e8f0]">
             <tr>
               <th className="px-5 py-3 text-left font-medium">模型</th>

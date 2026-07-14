@@ -221,8 +221,8 @@ function ChainEditor({
   const orderedModels = normalizeQueue(models);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl w-full max-w-5xl shadow-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-5xl shadow-2xl max-h-[94dvh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
           <h3 className="font-semibold text-slate-800">{chain ? '编辑故障转移链' : '创建故障转移链'}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
@@ -230,9 +230,9 @@ function ChainEditor({
           </button>
         </div>
 
-        <div className="p-6 space-y-5 overflow-y-auto flex-1">
+        <div className="p-4 sm:p-6 space-y-5 overflow-y-auto flex-1">
           {/* Basic Info */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">链名称</label>
               <input
@@ -606,19 +606,19 @@ export default function FailoverChains() {
             )}>
               {/* Header */}
               <div
-                className="px-5 py-4 flex items-center justify-between cursor-pointer hover:bg-slate-50/50 transition-colors"
+                className="px-4 py-4 sm:px-5 flex items-start justify-between gap-3 cursor-pointer hover:bg-slate-50/50 transition-colors"
                 onClick={() => setExpandedChain(isExpanded ? null : chain.id)}
               >
-                <div className="flex items-center gap-4">
+                <div className="flex min-w-0 items-center gap-3 sm:gap-4">
                   <div className={cn(
                     'w-10 h-10 rounded-lg flex items-center justify-center',
                     chain.enabled ? 'bg-gradient-to-br from-blue-50 to-violet-50' : 'bg-slate-100'
                   )}>
                     <GitBranch size={20} className={chain.enabled ? 'text-blue-600' : 'text-slate-400'} />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h4 className="font-semibold text-slate-800">{chain.name}</h4>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="truncate font-semibold text-slate-800">{chain.name}</h4>
                       <span className={cn(
                         'text-[10px] px-2 py-0.5 rounded-full font-medium',
                         chain.enabled ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
@@ -629,11 +629,11 @@ export default function FailoverChains() {
                         {strategyLabels[chain.strategy].label}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-400 mt-0.5">{chain.description}</p>
+                    <p className="truncate text-xs text-slate-400 mt-0.5">{chain.description}</p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4">
+                <div className="flex shrink-0 items-center gap-2 sm:gap-4">
                   {/* Stats */}
                   <div className="hidden md:flex items-center gap-6 text-xs text-slate-500">
                     <div className="text-center">
@@ -675,7 +675,7 @@ export default function FailoverChains() {
               {isExpanded && (
                 <div className="border-t border-slate-100">
                   {/* Proxy Info */}
-                  <div className="px-5 py-3 bg-gradient-to-r from-blue-50/50 to-violet-50/50 flex flex-wrap items-center gap-4 text-sm">
+                  <div className="px-4 py-3 sm:px-5 bg-gradient-to-r from-blue-50/50 to-violet-50/50 flex flex-wrap items-center gap-3 sm:gap-4 text-sm">
                     <div className="flex items-center gap-2">
                       <span className="text-slate-500">代理模型：</span>
                       <code className="bg-white px-2 py-0.5 rounded border border-slate-200 text-blue-600 font-mono text-xs">{chain.proxyModelName}</code>
@@ -712,7 +712,7 @@ export default function FailoverChains() {
                   </div>
 
                   {/* Visual Flow Diagram */}
-                  <div className="px-5 py-4">
+                  <div className="px-4 py-4 sm:px-5">
                     <p className="text-xs font-medium text-slate-500 mb-3">故障转移流程</p>
                     <div className="flex items-center gap-2 overflow-x-auto pb-2">
                       {/* Request entry */}

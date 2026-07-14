@@ -51,7 +51,7 @@ export default function ProxyEndpoints() {
           <h3 className="font-semibold text-slate-800">代理服务地址</h3>
         </div>
         <div className="p-5">
-          <div className="flex gap-3 items-end">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <div className="flex-1">
               <label className="block text-sm font-medium text-slate-700 mb-1">Base URL</label>
               <input
@@ -63,7 +63,7 @@ export default function ProxyEndpoints() {
             </div>
             <button
               onClick={() => copyToClipboard(baseEndpoint, 'base')}
-              className="px-4 py-2.5 border border-slate-200 rounded-lg text-slate-500 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 transition-colors flex items-center gap-2 text-sm"
+              className="px-4 py-2.5 border border-slate-200 rounded-lg text-slate-500 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 transition-colors flex items-center justify-center gap-2 text-sm"
             >
               {copiedId === 'base' ? <CheckCircle2 size={16} className="text-emerald-500" /> : <Copy size={16} />}
               复制
@@ -90,13 +90,13 @@ export default function ProxyEndpoints() {
               )}
               onClick={() => setSelectedChainId(chain.id)}
             >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-3">
+              <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
                   <div className={cn(
                     'w-2 h-2 rounded-full',
                     chain.enabled ? 'bg-emerald-500' : 'bg-slate-300'
                   )} />
-                  <span className="font-medium text-slate-800">{chain.name}</span>
+                  <span className="truncate font-medium text-slate-800">{chain.name}</span>
                   <span className={cn(
                     'text-[10px] px-2 py-0.5 rounded-full',
                     chain.enabled ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
@@ -108,10 +108,10 @@ export default function ProxyEndpoints() {
               </div>
 
               {/* Endpoint details */}
-              <div className="space-y-2 ml-5">
+              <div className="space-y-2 sm:ml-5">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 w-16 flex-shrink-0">模型名：</span>
-                  <code className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-blue-600 flex-1">
+                  <code className="min-w-0 truncate text-xs font-mono bg-slate-100 px-2 py-1 rounded text-blue-600 flex-1">
                     {chain.proxyModelName}
                   </code>
                   <button
@@ -123,7 +123,7 @@ export default function ProxyEndpoints() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 w-16 flex-shrink-0">API Key：</span>
-                  <code className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-600 flex-1">
+                  <code className="min-w-0 truncate text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-600 flex-1">
                     {showKeys.has(chain.id) ? chain.proxyApiKey : chain.proxyApiKey.slice(0, 8) + '••••••••••••'}
                   </code>
                   <button
@@ -141,7 +141,7 @@ export default function ProxyEndpoints() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 w-16 flex-shrink-0">端点：</span>
-                  <code className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-600 flex-1">
+                  <code className="min-w-0 truncate text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-600 flex-1">
                     {baseEndpoint}/chat/completions
                   </code>
                   <button

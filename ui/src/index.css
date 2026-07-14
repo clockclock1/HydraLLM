@@ -38,6 +38,10 @@ html {
   scroll-behavior: smooth;
 }
 
+body {
+  overflow-x: hidden;
+}
+
 button,
 a,
 input,
@@ -120,4 +124,18 @@ button:active {
 
 .animate-pulse-dot {
   animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@media (max-width: 767px) {
+  * {
+    scrollbar-gutter: auto;
+  }
+
+  .page-motion {
+    animation-duration: 260ms;
+  }
+
+  .motion-card {
+    animation-duration: 300ms;
+  }
 }

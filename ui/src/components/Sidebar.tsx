@@ -18,7 +18,7 @@ import { useStore } from '../store';
 import type { Page } from '../types';
 import { cn } from '../utils/cn';
 
-const navItems: { page: Page; label: string; icon: ReactNode }[] = [
+export const navItems: { page: Page; label: string; icon: ReactNode }[] = [
   { page: 'dashboard', label: '仪表盘', icon: <LayoutDashboard size={20} /> },
   { page: 'providers', label: '模型提供商', icon: <Server size={20} /> },
   { page: 'model-tests', label: '模型测试', icon: <TestTube size={20} /> },
@@ -29,20 +29,22 @@ const navItems: { page: Page; label: string; icon: ReactNode }[] = [
   { page: 'logs', label: '请求日志', icon: <ScrollText size={20} /> },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?: () => void }) {
   const { state, dispatch, loadConfig, saveConfig, logout } = useStore();
   const collapsed = state.sidebarCollapsed;
   const busy = state.saveStatus === 'loading' || state.saveStatus === 'saving';
+  const isCollapsed = !mobile && collapsed;
 
   return (
     <aside
       className={cn(
-        'h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white flex flex-col transition-all duration-300 border-r border-slate-700/50 flex-shrink-0',
-        collapsed ? 'w-16' : 'w-64'
+        'h-dvh bg-gradient-to-b from-slate-900 to-slate-800 text-white flex flex-col transition-all duration-300 border-r border-slate-700/50 flex-shrink-0',
+        isCollapsed ? 'w-16' : 'w-64',
+        mobile && 'w-[82vw] max-w-80 shadow-2xl'
       )}
     >
       <div className="flex h-16 items-center gap-3 border-b border-slate-700/50 px-4">
-        {!collapsed && (
+        {!isCollapsed && (
           <div className="overflow-hidden">
             <h1 className="whitespace-nowrap text-sm font-bold">Failover Proxy</h1>
             <p className="whitespace-nowrap text-[10px] text-slate-400">模型故障转移代理</p>
@@ -54,7 +56,10 @@ export default function Sidebar() {
         {navItems.map(({ page, label, icon }) => (
           <button
             key={page}
-            onClick={() => dispatch({ type: 'SET_PAGE', page })}
+            onClick={() => {
+              dispatch({ type: 'SET_PAGE', page });
+              onNavigate?.();
+            }}
             className={cn(
               'w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-300 hover:translate-x-0.5',
               state.currentPage === page
@@ -63,12 +68,12 @@ export default function Sidebar() {
             )}
           >
             <span className="flex-shrink-0">{icon}</span>
-            {!collapsed && <span className="whitespace-nowrap">{label}</span>}
+            {!isCollapsed && <span className="whitespace-nowrap">{label}</span>}
           </button>
         ))}
       </nav>
 
-      {!collapsed && (
+      {!isCollapsed && (
         <div className="space-y-2 border-t border-slate-700/50 px-3 py-3">
           <div className="grid grid-cols-3 gap-2">
             <button
@@ -110,14 +115,16 @@ export default function Sidebar() {
         </div>
       )}
 
+      {!mobile && (
       <div className="border-t border-slate-700/50 p-2">
         <button
           onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
           className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-700/50 hover:text-white"
         >
-          {collapsed ? <ChevronRight size={18} /> : <><ChevronLeft size={18} /><span>收起侧栏</span></>}
+          {isCollapsed ? <ChevronRight size={18} /> : <><ChevronLeft size={18} /><span>收起侧栏</span></>}
         </button>
       </div>
+      )}
     </aside>
   );
 }

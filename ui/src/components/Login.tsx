@@ -20,11 +20,11 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4">
+    <div className="flex min-h-dvh items-center justify-center bg-slate-950 px-3 py-6 sm:px-4">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(37,99,235,0.22),transparent_34%),radial-gradient(circle_at_78%_12%,rgba(20,184,166,0.14),transparent_30%),linear-gradient(135deg,#020617,#0f172a_48%,#111827)]" />
       <form
         onSubmit={handleSubmit}
-        className="page-motion relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-7 shadow-2xl shadow-blue-950/30 backdrop-blur"
+        className="page-motion relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-5 shadow-2xl shadow-blue-950/30 backdrop-blur sm:p-7"
       >
         <div className="mb-6">
           <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-600/25">
