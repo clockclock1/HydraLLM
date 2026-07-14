@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import type { Provider, FailoverChain, Page, LogEntry, ActiveThread, ModelCapability, ModelTestResult, ModelTestTarget } from './types';
+import type { Provider, FailoverChain, Page, LogEntry, ActiveThread, ModelCapability, ModelTestResult, ModelTestTarget, ChannelModelStats } from './types';
 
 interface BackendTarget {
   name?: string;
@@ -63,6 +63,7 @@ interface BackendStats {
     failures: number;
     failovers: number;
   }>;
+  channelModels?: Record<string, ChannelModelStats>;
   logs?: Array<{
     id: string;
     timestamp: number;
@@ -85,6 +86,9 @@ interface State {
   activeThreads: ActiveThread[];
   sidebarCollapsed: boolean;
   adminToken: string;
+  adminSession: string;
+  authenticated: boolean;
+  authChecked: boolean;
   configLoaded: boolean;
   saveStatus: 'idle' | 'loading' | 'saving' | 'saved' | 'error';
   saveError: string;
@@ -96,6 +100,9 @@ type Action =
   | { type: 'SET_PAGE'; page: Page }
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_ADMIN_TOKEN'; token: string }
+  | { type: 'SET_ADMIN_SESSION'; session: string }
+  | { type: 'CLEAR_AUTH' }
+  | { type: 'SET_AUTH_CHECKED'; checked: boolean }
   | { type: 'SET_SAVE_STATUS'; status: State['saveStatus']; error?: string }
   | { type: 'LOAD_BACKEND_STATE'; config: BackendConfig; stats?: BackendStats | null }
   | { type: 'LOAD_BACKEND_STATS'; stats: BackendStats }
@@ -142,7 +149,10 @@ const initialState: State = {
   chains: [],
   logs: [],
   activeThreads: [],
-  adminToken: localStorage.getItem('adminToken') || 'admin',
+  adminToken: '',
+  adminSession: sessionStorage.getItem('adminSession') || '',
+  authenticated: false,
+  authChecked: false,
   configLoaded: false,
   saveStatus: 'idle',
   saveError: '',
@@ -186,8 +196,29 @@ function reducer(state: State, action: Action): State {
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarCollapsed: !state.sidebarCollapsed };
     case 'SET_ADMIN_TOKEN':
-      localStorage.setItem('adminToken', action.token);
       return { ...state, adminToken: action.token };
+    case 'SET_ADMIN_SESSION':
+      sessionStorage.setItem('adminSession', action.session);
+      return { ...state, adminSession: action.session, authenticated: true, authChecked: true };
+    case 'CLEAR_AUTH':
+      sessionStorage.removeItem('adminSession');
+      return {
+        ...state,
+        adminSession: '',
+        authenticated: false,
+        authChecked: true,
+        configLoaded: false,
+        backendConfig: null,
+        backendStats: null,
+        providers: [],
+        chains: [],
+        logs: [],
+        activeThreads: [],
+        saveStatus: 'idle',
+        saveError: '',
+      };
+    case 'SET_AUTH_CHECKED':
+      return { ...state, authChecked: action.checked };
     case 'SET_SAVE_STATUS':
       return { ...state, saveStatus: action.status, saveError: action.error || '' };
     case 'LOAD_BACKEND_STATE': {
@@ -198,6 +229,9 @@ function reducer(state: State, action: Action): State {
         activeThreads: ((action.stats || null)?.activeThreads || []).map(normalizeActiveThread),
         backendConfig: action.config,
         backendStats: action.stats || null,
+        adminToken: action.config.adminToken || '',
+        authenticated: true,
+        authChecked: true,
         configLoaded: true,
         saveStatus: 'idle',
         saveError: '',
@@ -497,8 +531,10 @@ async function readJsonError(res: Response) {
 const StoreContext = createContext<{
   state: State;
   dispatch: React.Dispatch<Action>;
-  loadConfig: (tokenOverride?: string) => Promise<void>;
-  saveConfig: (tokenOverride?: string) => Promise<void>;
+  login: (token: string) => Promise<void>;
+  logout: () => Promise<void>;
+  loadConfig: (sessionOverride?: string) => Promise<void>;
+  saveConfig: () => Promise<void>;
   fetchProviderModels: (url: string, apiKey: string) => Promise<string[]>;
   refreshProviderHealth: () => Promise<void>;
   runModelTests: (targets: ModelTestTarget[], capabilities: ModelCapability[]) => Promise<ModelTestResult[]>;
@@ -507,35 +543,43 @@ const StoreContext = createContext<{
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  const loadConfig = useCallback(async (tokenOverride?: string) => {
-    const token = tokenOverride || state.adminToken;
+  const adminHeaders = useCallback((sessionOverride?: string) => ({
+    'x-admin-session': sessionOverride || state.adminSession,
+  }), [state.adminSession]);
+
+  const handleUnauthorized = useCallback((res: Response) => {
+    if (res.status === 401) dispatch({ type: 'CLEAR_AUTH' });
+  }, []);
+
+  const loadConfig = useCallback(async (sessionOverride?: string) => {
+    const session = sessionOverride || state.adminSession;
+    if (!session) {
+      dispatch({ type: 'CLEAR_AUTH' });
+      return;
+    }
     dispatch({ type: 'SET_SAVE_STATUS', status: 'loading' });
     const res = await fetch('/api/config', {
-      headers: { 'x-admin-token': token },
+      headers: adminHeaders(session),
     });
     if (!res.ok) {
+      handleUnauthorized(res);
       const message = await readJsonError(res);
       dispatch({ type: 'SET_SAVE_STATUS', status: 'error', error: message });
       throw new Error(message);
     }
     const config = await res.json();
     const stats = await fetch('/api/stats', {
-      headers: { 'x-admin-token': token },
+      headers: adminHeaders(session),
     }).then((statsRes) => statsRes.ok ? statsRes.json() : null).catch(() => null);
     dispatch({ type: 'LOAD_BACKEND_STATE', config, stats });
-  }, [state.adminToken]);
+  }, [state.adminSession, adminHeaders, handleUnauthorized]);
 
-  const saveConfig = useCallback(async (tokenOverride?: string) => {
-    const token = tokenOverride || state.adminToken;
-    dispatch({ type: 'SET_SAVE_STATUS', status: 'saving' });
-    const nextConfig = uiToBackend({ ...state, adminToken: token });
-    const res = await fetch('/api/config', {
+  const login = useCallback(async (token: string) => {
+    dispatch({ type: 'SET_SAVE_STATUS', status: 'loading' });
+    const res = await fetch('/api/login', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-admin-token': token,
-      },
-      body: JSON.stringify(nextConfig),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token }),
     });
     if (!res.ok) {
       const message = await readJsonError(res);
@@ -543,26 +587,67 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       throw new Error(message);
     }
     const body = await res.json();
+    const session = String(body.session || '');
+    if (!session) throw new Error('Login response did not include a session');
+    dispatch({ type: 'SET_ADMIN_SESSION', session });
+    await loadConfig(session);
+  }, [loadConfig]);
+
+  const logout = useCallback(async () => {
+    const session = state.adminSession;
+    if (session) {
+      await fetch('/api/logout', {
+        method: 'POST',
+        headers: adminHeaders(session),
+      }).catch(() => undefined);
+    }
+    dispatch({ type: 'CLEAR_AUTH' });
+  }, [state.adminSession, adminHeaders]);
+
+  const saveConfig = useCallback(async () => {
+    const session = state.adminSession;
+    if (!session) {
+      dispatch({ type: 'CLEAR_AUTH' });
+      return;
+    }
+    dispatch({ type: 'SET_SAVE_STATUS', status: 'saving' });
+    const nextConfig = uiToBackend(state);
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...adminHeaders(session),
+      },
+      body: JSON.stringify(nextConfig),
+    });
+    if (!res.ok) {
+      handleUnauthorized(res);
+      const message = await readJsonError(res);
+      dispatch({ type: 'SET_SAVE_STATUS', status: 'error', error: message });
+      throw new Error(message);
+    }
+    const body = await res.json();
     const stats = await fetch('/api/stats', {
-      headers: { 'x-admin-token': token },
+      headers: adminHeaders(session),
     }).then((statsRes) => statsRes.ok ? statsRes.json() : null).catch(() => null);
     dispatch({ type: 'LOAD_BACKEND_STATE', config: body.config, stats });
     dispatch({ type: 'SET_SAVE_STATUS', status: 'saved' });
-  }, [state]);
+  }, [state, adminHeaders, handleUnauthorized]);
 
   const fetchProviderModels = useCallback(async (url: string, apiKey: string) => {
     const res = await fetch('/api/model-source/preview', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-admin-token': state.adminToken,
+        ...adminHeaders(),
       },
       body: JSON.stringify({ url, apiKey }),
     });
+    handleUnauthorized(res);
     if (!res.ok) throw new Error(await readJsonError(res));
     const body = await res.json();
     return body.models || [];
-  }, [state.adminToken]);
+  }, [adminHeaders, handleUnauthorized]);
 
   const providerHealthSignature = useMemo(
     () => state.providers.map((provider) => `${provider.id}:${provider.name}:${provider.baseUrl}:${provider.apiKey}`).join('|'),
@@ -585,45 +670,58 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-admin-token': state.adminToken,
+        ...adminHeaders(),
       },
       body: JSON.stringify({ providers: providerHealthRequest }),
     });
+    handleUnauthorized(res);
     if (!res.ok) throw new Error(await readJsonError(res));
     const body = await res.json();
     dispatch({ type: 'SET_PROVIDER_HEALTHS', providers: body.providers || [] });
-  }, [state.adminToken, state.configLoaded, providerHealthRequest]);
+  }, [state.configLoaded, providerHealthRequest, adminHeaders, handleUnauthorized]);
 
   const runModelTests = useCallback(async (targets: ModelTestTarget[], capabilities: ModelCapability[]) => {
     const res = await fetch('/api/model-tests/run', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-admin-token': state.adminToken,
+        ...adminHeaders(),
       },
       body: JSON.stringify({ targets, capabilities }),
     });
+    handleUnauthorized(res);
     if (!res.ok) throw new Error(await readJsonError(res));
     const body = await res.json();
     return body.results || [];
-  }, [state.adminToken]);
+  }, [adminHeaders, handleUnauthorized]);
 
   useEffect(() => {
-    loadConfig().catch(() => undefined);
-  }, [loadConfig]);
+    if (state.authChecked) return;
+    if (!state.adminSession) {
+      dispatch({ type: 'SET_AUTH_CHECKED', checked: true });
+      return;
+    }
+    loadConfig(state.adminSession).catch(() => dispatch({ type: 'CLEAR_AUTH' }));
+  }, [state.authChecked, state.adminSession, loadConfig]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (!state.configLoaded) return;
-      fetch('/api/stats', { headers: { 'x-admin-token': state.adminToken } })
-        .then((res) => res.ok ? res.json() : null)
+      fetch('/api/stats', { headers: adminHeaders() })
+        .then((res) => {
+          if (res.status === 401) {
+            dispatch({ type: 'CLEAR_AUTH' });
+            return null;
+          }
+          return res.ok ? res.json() : null;
+        })
         .then((stats) => {
           if (stats) dispatch({ type: 'LOAD_BACKEND_STATS', stats });
         })
         .catch(() => undefined);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [state.configLoaded, state.adminToken]);
+  }, [state.configLoaded, adminHeaders]);
 
   useEffect(() => {
     if (!state.configLoaded || !state.providers.length) return;
@@ -635,7 +733,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [state.configLoaded, providerHealthSignature, refreshProviderHealth]);
 
   return (
-    <StoreContext.Provider value={{ state, dispatch, loadConfig, saveConfig, fetchProviderModels, refreshProviderHealth, runModelTests }}>
+    <StoreContext.Provider value={{ state, dispatch, login, logout, loadConfig, saveConfig, fetchProviderModels, refreshProviderHealth, runModelTests }}>
       {children}
     </StoreContext.Provider>
   );

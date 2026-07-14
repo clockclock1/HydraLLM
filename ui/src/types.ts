@@ -40,7 +40,25 @@ export interface FailoverChain {
   successRate: number;
 }
 
-export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'endpoints' | 'live-status' | 'logs';
+export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'model-stats' | 'endpoints' | 'live-status' | 'logs';
+
+export interface ChannelModelStats {
+  name: string;
+  baseUrl: string;
+  requests: number;
+  successes: number;
+  failures: number;
+  models: Record<string, {
+    name: string;
+    requests: number;
+    successes: number;
+    failures: number;
+    lastStatus: number;
+    lastError: string;
+    lastLatencyMs: number;
+    updatedAt: number;
+  }>;
+}
 
 export interface ActiveThread {
   id: string;

@@ -1,35 +1,36 @@
-import { useState } from 'react';
+import type { ReactNode } from 'react';
 import {
-  LayoutDashboard,
-  Server,
-  GitBranch,
-  Link2,
-  ScrollText,
+  Activity,
+  BarChart3,
   ChevronLeft,
   ChevronRight,
-  Shield,
-  Save,
+  GitBranch,
+  LayoutDashboard,
+  Link2,
+  LogOut,
   RefreshCw,
+  Save,
+  ScrollText,
+  Server,
   TestTube,
-  Activity,
 } from 'lucide-react';
 import { useStore } from '../store';
 import type { Page } from '../types';
 import { cn } from '../utils/cn';
 
-const navItems: { page: Page; label: string; icon: React.ReactNode }[] = [
+const navItems: { page: Page; label: string; icon: ReactNode }[] = [
   { page: 'dashboard', label: '仪表盘', icon: <LayoutDashboard size={20} /> },
   { page: 'providers', label: '模型提供商', icon: <Server size={20} /> },
   { page: 'model-tests', label: '模型测试', icon: <TestTube size={20} /> },
   { page: 'chains', label: '故障转移链', icon: <GitBranch size={20} /> },
+  { page: 'model-stats', label: '模型统计', icon: <BarChart3 size={20} /> },
   { page: 'endpoints', label: '代理端点', icon: <Link2 size={20} /> },
   { page: 'live-status', label: '实时状况', icon: <Activity size={20} /> },
   { page: 'logs', label: '请求日志', icon: <ScrollText size={20} /> },
 ];
 
 export default function Sidebar() {
-  const { state, dispatch, loadConfig, saveConfig } = useStore();
-  const [token, setToken] = useState(state.adminToken);
+  const { state, dispatch, loadConfig, saveConfig, logout } = useStore();
   const collapsed = state.sidebarCollapsed;
   const busy = state.saveStatus === 'loading' || state.saveStatus === 'saving';
 
@@ -40,30 +41,25 @@ export default function Sidebar() {
         collapsed ? 'w-16' : 'w-64'
       )}
     >
-      {/* Logo */}
-      <div className="flex items-center gap-3 px-4 h-16 border-b border-slate-700/50">
-        <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-violet-600 rounded-lg flex items-center justify-center flex-shrink-0">
-          <Shield size={18} className="text-white" />
-        </div>
+      <div className="flex h-16 items-center gap-3 border-b border-slate-700/50 px-4">
         {!collapsed && (
           <div className="overflow-hidden">
-            <h1 className="text-sm font-bold whitespace-nowrap">Failover Proxy</h1>
-            <p className="text-[10px] text-slate-400 whitespace-nowrap">模型故障转移代理</p>
+            <h1 className="whitespace-nowrap text-sm font-bold">Failover Proxy</h1>
+            <p className="whitespace-nowrap text-[10px] text-slate-400">模型故障转移代理</p>
           </div>
         )}
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 py-4 px-2 space-y-1">
+      <nav className="flex-1 space-y-1 px-2 py-4">
         {navItems.map(({ page, label, icon }) => (
           <button
             key={page}
             onClick={() => dispatch({ type: 'SET_PAGE', page })}
             className={cn(
-              'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200',
+              'w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-300 hover:translate-x-0.5',
               state.currentPage === page
                 ? 'bg-blue-600/20 text-blue-400 shadow-lg shadow-blue-500/5'
-                : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+                : 'text-slate-400 hover:bg-slate-700/50 hover:text-white'
             )}
           >
             <span className="flex-shrink-0">{icon}</span>
@@ -73,24 +69,10 @@ export default function Sidebar() {
       </nav>
 
       {!collapsed && (
-        <div className="px-3 py-3 border-t border-slate-700/50 space-y-2">
-          <label className="block">
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Admin Token</span>
-            <input
-              value={token}
-              onChange={e => setToken(e.target.value)}
-              onBlur={() => dispatch({ type: 'SET_ADMIN_TOKEN', token })}
-              className="mt-1 w-full rounded-lg bg-slate-950/50 border border-slate-700 px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500"
-              placeholder="admin"
-              type="password"
-            />
-          </label>
-          <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-2 border-t border-slate-700/50 px-3 py-3">
+          <div className="grid grid-cols-3 gap-2">
             <button
-              onClick={() => {
-                dispatch({ type: 'SET_ADMIN_TOKEN', token });
-                loadConfig(token).catch(() => undefined);
-              }}
+              onClick={() => loadConfig().catch(() => undefined)}
               disabled={busy}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-slate-700/70 px-2 py-2 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50"
             >
@@ -98,15 +80,20 @@ export default function Sidebar() {
               加载
             </button>
             <button
-              onClick={() => {
-                dispatch({ type: 'SET_ADMIN_TOKEN', token });
-                saveConfig(token).catch(() => undefined);
-              }}
+              onClick={() => saveConfig().catch(() => undefined)}
               disabled={busy}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-2 py-2 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
             >
               <Save size={13} />
               保存
+            </button>
+            <button
+              onClick={() => logout().catch(() => undefined)}
+              disabled={busy}
+              className="flex items-center justify-center gap-1.5 rounded-lg bg-slate-800 px-2 py-2 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+            >
+              <LogOut size={13} />
+              退出
             </button>
           </div>
           <p className={cn(
@@ -118,16 +105,15 @@ export default function Sidebar() {
             {state.saveStatus === 'saving' && '正在保存配置...'}
             {state.saveStatus === 'saved' && '配置已保存'}
             {state.saveStatus === 'error' && (state.saveError || '操作失败')}
-            {state.saveStatus === 'idle' && (state.configLoaded ? '已连接后端配置' : '等待加载配置')}
+            {state.saveStatus === 'idle' && (state.configLoaded ? '已登录并连接后端' : '等待加载配置')}
           </p>
         </div>
       )}
 
-      {/* Collapse toggle */}
-      <div className="p-2 border-t border-slate-700/50">
+      <div className="border-t border-slate-700/50 p-2">
         <button
           onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 transition-colors text-sm"
+          className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-700/50 hover:text-white"
         >
           {collapsed ? <ChevronRight size={18} /> : <><ChevronLeft size={18} /><span>收起侧栏</span></>}
         </button>

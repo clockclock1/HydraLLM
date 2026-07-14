@@ -9,6 +9,7 @@ const runtimeDir = process.pkg ? path.dirname(process.execPath) : __dirname;
 const publicDir = process.pkg ? path.join(__dirname, "public") : path.join(__dirname, "public");
 const dataDir = process.env.DATA_DIR || path.join(runtimeDir, "data");
 const configPath = process.env.CONFIG_PATH || path.join(dataDir, "config.json");
+const statsPath = process.env.STATS_PATH || path.join(dataDir, "stats.json");
 const host = process.env.HOST || "0.0.0.0";
 const port = Number(process.env.PORT || 8787);
 const bodyLimitBytes = Number(process.env.BODY_LIMIT_MB || 50) * 1024 * 1024;
@@ -26,16 +27,9 @@ const staticTypes = {
   ".ico": "image/x-icon"
 };
 
-const stats = {
-  startedAt: new Date().toISOString(),
-  requests: 0,
-  successes: 0,
-  failures: 0,
-  failovers: 0,
-  targets: {},
-  chains: {},
-  logs: []
-};
+const stats = defaultStats();
+let statsSaveTimer = null;
+let statsSavePromise = Promise.resolve();
 
 const circuitBreakers = new Map();
 const roundRobinCursors = new Map();
@@ -119,6 +113,98 @@ const modelSourceCache = {
 };
 const proxyConcurrency = new Map();
 const activeProxyThreads = new Map();
+const adminSessions = new Map();
+
+function defaultStats() {
+  return {
+    startedAt: new Date().toISOString(),
+    requests: 0,
+    successes: 0,
+    failures: 0,
+    failovers: 0,
+    targets: {},
+    chains: {},
+    channelModels: {},
+    logs: []
+  };
+}
+
+function normalizeStats(input) {
+  const base = defaultStats();
+  const next = { ...base, ...(input || {}) };
+  next.startedAt = String(next.startedAt || base.startedAt);
+  next.requests = Math.max(0, Math.floor(Number(next.requests) || 0));
+  next.successes = Math.max(0, Math.floor(Number(next.successes) || 0));
+  next.failures = Math.max(0, Math.floor(Number(next.failures) || 0));
+  next.failovers = Math.max(0, Math.floor(Number(next.failovers) || 0));
+  next.targets = next.targets && typeof next.targets === "object" ? next.targets : {};
+  next.chains = next.chains && typeof next.chains === "object" ? next.chains : {};
+  next.channelModels = normalizeChannelModelStats(next.channelModels);
+  next.logs = Array.isArray(next.logs) ? next.logs.slice(0, 500) : [];
+  return next;
+}
+
+function normalizeChannelModelStats(input) {
+  const output = {};
+  if (!input || typeof input !== "object") return output;
+  for (const [channelName, channel] of Object.entries(input)) {
+    const name = String(channelName || channel?.name || "unknown");
+    output[name] = {
+      name,
+      baseUrl: String(channel?.baseUrl || ""),
+      requests: Math.max(0, Math.floor(Number(channel?.requests) || 0)),
+      successes: Math.max(0, Math.floor(Number(channel?.successes) || 0)),
+      failures: Math.max(0, Math.floor(Number(channel?.failures) || 0)),
+      models: {}
+    };
+    const models = channel?.models && typeof channel.models === "object" ? channel.models : {};
+    for (const [modelName, model] of Object.entries(models)) {
+      const normalizedModelName = String(modelName || model?.name || "unknown");
+      output[name].models[normalizedModelName] = {
+        name: normalizedModelName,
+        requests: Math.max(0, Math.floor(Number(model?.requests) || 0)),
+        successes: Math.max(0, Math.floor(Number(model?.successes) || 0)),
+        failures: Math.max(0, Math.floor(Number(model?.failures) || 0)),
+        lastStatus: Math.max(0, Math.floor(Number(model?.lastStatus) || 0)),
+        lastError: String(model?.lastError || ""),
+        lastLatencyMs: Math.max(0, Math.floor(Number(model?.lastLatencyMs) || 0)),
+        updatedAt: Math.max(0, Number(model?.updatedAt || 0))
+      };
+    }
+  }
+  return output;
+}
+
+async function loadStats() {
+  await mkdir(dataDir, { recursive: true });
+  try {
+    const text = await readFile(statsPath, "utf8");
+    Object.assign(stats, normalizeStats(JSON.parse(text)));
+  } catch (err) {
+    if (err.code !== "ENOENT") console.warn(`Cannot load stats: ${err.message}`);
+    Object.assign(stats, normalizeStats(stats));
+    await saveStatsNow();
+  }
+}
+
+async function saveStatsNow() {
+  await mkdir(path.dirname(statsPath), { recursive: true });
+  const tmpPath = `${statsPath}.${crypto.randomUUID()}.tmp`;
+  const snapshot = normalizeStats(stats);
+  await writeFile(tmpPath, JSON.stringify(snapshot, null, 2), "utf8");
+  await rename(tmpPath, statsPath);
+}
+
+function scheduleStatsSave() {
+  if (statsSaveTimer) return;
+  statsSaveTimer = setTimeout(() => {
+    statsSaveTimer = null;
+    statsSavePromise = statsSavePromise
+      .then(() => saveStatsNow())
+      .catch((err) => console.warn(`Cannot save stats: ${err.message}`));
+  }, 250);
+  statsSaveTimer.unref?.();
+}
 
 async function ensureConfig() {
   await mkdir(dataDir, { recursive: true });
@@ -230,7 +316,7 @@ function withCors(headers = {}) {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "authorization,content-type,x-admin-token",
+    "access-control-allow-headers": "authorization,content-type,x-admin-token,x-admin-session",
     "access-control-expose-headers": "content-type,x-proxy-target,x-proxy-model",
     ...headers
   };
@@ -259,8 +345,21 @@ function authBearer(req) {
 }
 
 function isAdmin(req, cfg) {
+  const sessionToken = String(req.headers["x-admin-session"] || "");
+  if (sessionToken && adminSessions.has(sessionToken)) return true;
   const headerToken = String(req.headers["x-admin-token"] || "");
   return headerToken === cfg.adminToken || authBearer(req) === cfg.adminToken;
+}
+
+function createAdminSession() {
+  const token = crypto.randomBytes(32).toString("base64url");
+  adminSessions.set(token, { createdAt: Date.now() });
+  return token;
+}
+
+function deleteAdminSession(req) {
+  const sessionToken = String(req.headers["x-admin-session"] || "");
+  if (sessionToken) adminSessions.delete(sessionToken);
 }
 
 function isProxyKey(req, cfg) {
@@ -361,6 +460,52 @@ function targetKey(model, target) {
   return `${model.publicName}/${target.name || ""}/${target.modelName || ""}/${target.baseUrl || ""}`;
 }
 
+function channelLabel(target) {
+  return target.name || providerNameFromUrl(target.baseUrl || "") || "unknown";
+}
+
+function channelModelLabel(target) {
+  return target.modelName || target.modelNameTemplate || target.name || target.baseUrl || "unknown";
+}
+
+function recordChannelModelStats(target, ok, failure = {}, latencyMs = 0) {
+  const channelName = channelLabel(target);
+  const modelName = channelModelLabel(target);
+  const now = Date.now();
+  stats.channelModels[channelName] ||= {
+    name: channelName,
+    baseUrl: target.baseUrl || "",
+    requests: 0,
+    successes: 0,
+    failures: 0,
+    models: {}
+  };
+  const channel = stats.channelModels[channelName];
+  channel.baseUrl ||= target.baseUrl || "";
+  channel.requests += 1;
+  if (ok) channel.successes += 1;
+  else channel.failures += 1;
+
+  channel.models[modelName] ||= {
+    name: modelName,
+    requests: 0,
+    successes: 0,
+    failures: 0,
+    lastStatus: 0,
+    lastError: "",
+    lastLatencyMs: 0,
+    updatedAt: 0
+  };
+  const modelStats = channel.models[modelName];
+  modelStats.requests += 1;
+  if (ok) modelStats.successes += 1;
+  else modelStats.failures += 1;
+  modelStats.lastStatus = ok ? 0 : Number(failure?.status || 0);
+  modelStats.lastError = ok ? "" : String(failure?.message || failure?.body || "");
+  modelStats.lastLatencyMs = Math.max(0, Math.floor(Number(latencyMs) || 0));
+  modelStats.updatedAt = now;
+}
+
 function recordTarget(model, target, ok, cfg, failure = {}, latencyMs = 0) {
   const key = targetKey(model, target);
   const breakerConfig = modelCircuitBreaker(model, cfg);
@@ -405,6 +550,8 @@ function recordTarget(model, target, ok, cfg, failure = {}, latencyMs = 0) {
     stats.targets[key].consecutiveFailures = breaker.failures;
     stats.targets[key].disabledUntil = breaker.disabledUntil || 0;
   }
+  recordChannelModelStats(target, ok, failure, measuredLatency);
+  scheduleStatsSave();
 }
 
 function recordTargetFailure(model, target, cfg, failure, latencyMs = 0) {
@@ -414,6 +561,7 @@ function recordTargetFailure(model, target, cfg, failure, latencyMs = 0) {
     stats.targets[key].lastStatus = Number(failure?.status || 0);
     stats.targets[key].lastError = failure?.message || failure?.body || "";
   }
+  scheduleStatsSave();
 }
 
 function modelCircuitBreaker(model, cfg) {
@@ -584,6 +732,7 @@ function isCircuitOpen(model, target) {
     if (stats.targets[key]) {
       stats.targets[key].consecutiveFailures = 0;
       stats.targets[key].disabledUntil = 0;
+      scheduleStatsSave();
     }
     return false;
   }
@@ -599,6 +748,7 @@ function resetModelCircuits(model) {
       stats.targets[key].disabledUntil = 0;
     }
   }
+  scheduleStatsSave();
 }
 
 function chainStats(model) {
@@ -618,6 +768,7 @@ function addLog(entry) {
     ...entry
   });
   stats.logs = stats.logs.slice(0, 500);
+  scheduleStatsSave();
 }
 
 function sourceCacheKey(source) {
@@ -1810,6 +1961,37 @@ function trimError(text) {
   return String(text || "").slice(0, 1500);
 }
 
+async function handleAuthApi(req, res, pathname, cfg) {
+  if (req.method === "POST" && pathname === "/api/login") {
+    try {
+      const body = await readJson(req);
+      const token = String(body.token || "");
+      if (token !== cfg.adminToken) {
+        sendError(res, 401, "Invalid admin token");
+        return true;
+      }
+      const session = createAdminSession();
+      send(res, 200, { ok: true, session });
+    } catch (err) {
+      sendError(res, 400, err.message || "Cannot login");
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && pathname === "/api/logout") {
+    deleteAdminSession(req);
+    send(res, 200, { ok: true });
+    return true;
+  }
+
+  if (req.method === "GET" && pathname === "/api/session") {
+    send(res, 200, { ok: isAdmin(req, cfg) });
+    return true;
+  }
+
+  return false;
+}
+
 async function handleAdminApi(req, res, pathname, cfg) {
   if (!isAdmin(req, cfg)) {
     sendError(res, 401, "Invalid admin token");
@@ -1939,6 +2121,7 @@ async function handleRequest(req, res) {
       ok: true,
       startedAt: stats.startedAt,
       configPath,
+      statsPath,
       models: models.map((model) => model.publicName),
       modelSourceError: modelSourceCache.error || ""
     });
@@ -1956,6 +2139,7 @@ async function handleRequest(req, res) {
   }
 
   if (pathname.startsWith("/api/")) {
+    if (await handleAuthApi(req, res, pathname, cfg)) return;
     await handleAdminApi(req, res, pathname, cfg);
     return;
   }
@@ -1969,6 +2153,7 @@ async function handleRequest(req, res) {
 }
 
 await ensureConfig();
+await loadStats();
 
 const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
