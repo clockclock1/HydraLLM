@@ -369,7 +369,7 @@ function recordTarget(model, target, ok, cfg, failure = {}, latencyMs = 0) {
   const immediateCooldownStatusCodes = breakerConfig.immediateCooldownStatusCodes;
   stats.targets[key] ||= {
     model: model.publicName,
-    target: target.name || target.modelName || target.baseUrl,
+    target: target.modelName || target.name || target.baseUrl,
     upstreamModel: target.modelName || "",
     baseUrl: target.baseUrl || "",
     ok: 0,
@@ -1393,7 +1393,7 @@ async function handleProxy(req, res, pathname, cfg) {
         status: "Target is in circuit-open state, skipped",
         failedModels: [...failedModels, targetLabel(target)]
       });
-      errors.push({ target: target.name, message: "circuit open" });
+      errors.push({ target: targetLabel(target), message: "circuit open" });
       failedModels.push(targetLabel(target));
       continue;
     }
@@ -1417,7 +1417,7 @@ async function handleProxy(req, res, pathname, cfg) {
           status: "Target entered circuit-open state before retry, skipped",
           failedModels: [...failedModels, targetLabel(target)]
         });
-        errors.push({ target: target.name, attempt, message: "circuit open" });
+        errors.push({ target: targetLabel(target), attempt, message: "circuit open" });
         failedModels.push(targetLabel(target));
         break;
       }
@@ -1450,7 +1450,7 @@ async function handleProxy(req, res, pathname, cfg) {
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
-        errors.push({ target: target.name, attempt, message: failure.message });
+        errors.push({ target: targetLabel(target), attempt, message: failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         break;
@@ -1477,7 +1477,7 @@ async function handleProxy(req, res, pathname, cfg) {
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
-        errors.push({ target: target.name, attempt, status: failure.status || upstream.status, body: failure.body || failure.message });
+        errors.push({ target: targetLabel(target), attempt, status: failure.status || upstream.status, body: failure.body || failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         if (shouldTryNext(failure.status || upstream.status, cfg)) break;
@@ -1518,7 +1518,7 @@ async function handleProxy(req, res, pathname, cfg) {
             failedModels: [...failedModels]
           });
           recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
-          errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
+          errors.push({ target: targetLabel(target), attempt, status: failure.status, body: failure.body || failure.message });
           if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
           failedModels.push(targetLabel(target));
           if (shouldTryNext(failure.status, cfg)) break;
@@ -1590,7 +1590,7 @@ async function handleProxy(req, res, pathname, cfg) {
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
-        errors.push({ target: target.name, attempt, message: failure.message });
+        errors.push({ target: targetLabel(target), attempt, message: failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         break;
@@ -1612,7 +1612,7 @@ async function handleProxy(req, res, pathname, cfg) {
           failedModels: [...failedModels]
         });
         recordTargetFailure(model, target, cfg, failure, Date.now() - targetStartedAt);
-        errors.push({ target: target.name, attempt, status: failure.status, body: failure.body || failure.message });
+        errors.push({ target: targetLabel(target), attempt, status: failure.status, body: failure.body || failure.message });
         if (shouldRetryTarget(failure, cfg, attempt, maxAttempts, model)) continue;
         failedModels.push(targetLabel(target));
         if (shouldTryNext(failure.status, cfg)) break;
