@@ -1,7 +1,8 @@
-import { Activity, Clock3, GitBranch, Loader2, Radio, Server, TimerReset } from 'lucide-react';
+import { Clock3, Server, TimerReset } from 'lucide-react';
 import { useStore } from '../store';
 import type { ActiveThread } from '../types';
 import { cn } from '../utils/cn';
+import AnimatedGlyph from './AnimatedGlyph';
 
 const phaseMeta: Record<string, { label: string; className: string }> = {
   starting: { label: '创建中', className: 'border-slate-200 bg-slate-50 text-slate-600' },
@@ -38,17 +39,17 @@ function PhasePill({ phase }: { phase: string }) {
   );
 }
 
-function ThreadCard({ thread, now }: { thread: ActiveThread; now: number }) {
+function ThreadCard({ thread, now, index }: { thread: ActiveThread; now: number; index: number }) {
   const targetLabel = thread.targetModel || thread.targetName || thread.targetBaseUrl || '等待目标';
   const release = releaseText(thread, now);
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:border-blue-200">
+    <div className="motion-card rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md" style={{ animationDelay: `${Math.min(index, 12) * 35}ms` }}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
-              <Radio size={15} />
+              <AnimatedGlyph variant="threads" className="text-blue-600" />
             </span>
             <h3 className="truncate font-semibold text-slate-800">{thread.chainName}</h3>
             <PhasePill phase={thread.phase} />
@@ -134,46 +135,46 @@ export default function LiveStatus() {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
-            <Activity size={13} />
+          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
+            <AnimatedGlyph variant="activity" />
             Live Threads
           </div>
           <h2 className="mt-3 text-2xl font-bold text-slate-800">实时状况</h2>
           <p className="mt-1 text-slate-500">查看代理 API 当前创建的线程和正在尝试的目标模型。</p>
         </div>
-        <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-          <Loader2 size={15} className="animate-spin" />
+        <div className="inline-flex w-fit items-center gap-2 self-start rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700 xl:self-auto">
+          <AnimatedGlyph variant="refresh" />
           自动刷新
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="motion-card rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between">
             <span className="text-sm text-slate-500">活动线程</span>
-            <Radio size={16} className="text-blue-500" />
+            <AnimatedGlyph variant="threads" className="text-blue-500" />
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-800">{threads.length}</p>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="motion-card rounded-xl border border-slate-200 bg-white p-4" style={{ animationDelay: '45ms' }}>
           <div className="flex items-center justify-between">
             <span className="text-sm text-slate-500">涉及链路</span>
-            <GitBranch size={16} className="text-violet-500" />
+            <AnimatedGlyph variant="chains" className="text-violet-500" />
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-800">{activeChains}</p>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="motion-card rounded-xl border border-slate-200 bg-white p-4" style={{ animationDelay: '90ms' }}>
           <div className="flex items-center justify-between">
             <span className="text-sm text-slate-500">释放等待</span>
-            <TimerReset size={16} className="text-amber-500" />
+            <AnimatedGlyph variant="release" className="text-amber-500" />
           </div>
           <p className="mt-2 text-2xl font-bold text-slate-800">{releasing}</p>
         </div>
       </div>
 
       <div className="space-y-3">
-        {threads.map(thread => (
-          <ThreadCard key={thread.id} thread={thread} now={now} />
+        {threads.map((thread, index) => (
+          <ThreadCard key={thread.id} thread={thread} now={now} index={index} />
         ))}
         {!threads.length && (
           <div className="rounded-xl border border-dashed border-slate-200 bg-white py-16 text-center">

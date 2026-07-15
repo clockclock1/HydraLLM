@@ -45,7 +45,7 @@ export default function ProxyEndpoints() {
       </div>
 
       {/* Base Endpoint Config */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <Globe size={18} className="text-slate-600" />
           <h3 className="font-semibold text-slate-800">代理服务地址</h3>
@@ -73,7 +73,7 @@ export default function ProxyEndpoints() {
       </div>
 
       {/* Endpoint List */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden" style={{ animationDelay: '45ms' }}>
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <Link2 size={18} className="text-slate-600" />
           <h3 className="font-semibold text-slate-800">可用端点</h3>
@@ -81,13 +81,14 @@ export default function ProxyEndpoints() {
         </div>
 
         <div className="divide-y divide-slate-50">
-          {state.chains.map(chain => (
+          {state.chains.map((chain, index) => (
             <div
               key={chain.id}
               className={cn(
-                'px-5 py-4 transition-colors cursor-pointer',
+                'table-row-motion px-5 py-4 transition-colors cursor-pointer',
                 selectedChain?.id === chain.id ? 'bg-blue-50/30' : 'hover:bg-slate-50'
               )}
+              style={{ animationDelay: `${Math.min(index, 14) * 22}ms` }}
               onClick={() => setSelectedChainId(chain.id)}
             >
               <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -167,7 +168,7 @@ export default function ProxyEndpoints() {
       {selectedChain && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* cURL */}
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Terminal size={16} className="text-slate-500" />
@@ -197,7 +198,7 @@ export default function ProxyEndpoints() {
           </div>
 
           {/* Python */}
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden" style={{ animationDelay: '60ms' }}>
             <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Code2 size={16} className="text-slate-500" />
@@ -233,7 +234,7 @@ response = client.chat.completions.create(
       )}
 
       {/* Security Notice */}
-      <div className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex items-start gap-3">
+      <div className="motion-card bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex items-start gap-3">
         <Shield size={18} className="text-amber-500 mt-0.5 flex-shrink-0" />
         <div>
           <p className="text-sm font-medium text-amber-800">安全提示</p>

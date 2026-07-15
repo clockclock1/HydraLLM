@@ -221,8 +221,8 @@ function ChainEditor({
   const orderedModels = normalizeQueue(models);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-5xl shadow-2xl max-h-[94dvh] flex flex-col" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-2 pt-4 sm:p-4 sm:pt-6" onClick={onClose}>
+      <div className="my-auto flex max-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col rounded-xl bg-white shadow-2xl sm:max-h-[calc(100dvh-3rem)] sm:rounded-2xl" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
           <h3 className="font-semibold text-slate-800">{chain ? '编辑故障转移链' : '创建故障转移链'}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
@@ -597,13 +597,13 @@ export default function FailoverChains() {
 
       {/* Chains */}
       <div className="space-y-4">
-        {state.chains.map(chain => {
+        {state.chains.map((chain, index) => {
           const isExpanded = expandedChain === chain.id;
           return (
             <div key={chain.id} className={cn(
-              'bg-white rounded-xl border overflow-hidden transition-all',
+              'motion-card bg-white rounded-xl border overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md',
               chain.enabled ? 'border-slate-200' : 'border-slate-200 opacity-70'
-            )}>
+            )} style={{ animationDelay: `${Math.min(index, 14) * 35}ms` }}>
               {/* Header */}
               <div
                 className="px-4 py-4 sm:px-5 flex items-start justify-between gap-3 cursor-pointer hover:bg-slate-50/50 transition-colors"
@@ -803,7 +803,7 @@ export default function FailoverChains() {
       </div>
 
       {state.chains.length === 0 && (
-        <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
+        <div className="motion-card text-center py-16 bg-white rounded-xl border border-slate-200">
           <GitBranch size={40} className="mx-auto text-slate-300 mb-3" />
           <p className="text-slate-500">暂无故障转移链</p>
           <p className="text-xs text-slate-400 mt-1">创建第一条故障转移链来开始使用</p>

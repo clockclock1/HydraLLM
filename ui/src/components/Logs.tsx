@@ -36,26 +36,26 @@ export default function Logs() {
 
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-slate-200 px-4 py-3">
+        <div className="motion-card bg-white rounded-xl border border-slate-200 px-4 py-3">
           <p className="text-xs text-slate-500">总日志</p>
           <p className="text-xl font-bold text-slate-800 mt-1">{state.logs.length}</p>
         </div>
-        <div className="bg-white rounded-xl border border-slate-200 px-4 py-3">
+        <div className="motion-card bg-white rounded-xl border border-slate-200 px-4 py-3" style={{ animationDelay: '35ms' }}>
           <p className="text-xs text-slate-500">成功请求</p>
           <p className="text-xl font-bold text-emerald-600 mt-1">{state.logs.filter(l => l.status === 'success').length}</p>
         </div>
-        <div className="bg-white rounded-xl border border-slate-200 px-4 py-3">
+        <div className="motion-card bg-white rounded-xl border border-slate-200 px-4 py-3" style={{ animationDelay: '70ms' }}>
           <p className="text-xs text-slate-500">失败请求</p>
           <p className="text-xl font-bold text-red-500 mt-1">{state.logs.filter(l => l.status === 'failed').length}</p>
         </div>
-        <div className="bg-white rounded-xl border border-slate-200 px-4 py-3">
+        <div className="motion-card bg-white rounded-xl border border-slate-200 px-4 py-3" style={{ animationDelay: '105ms' }}>
           <p className="text-xs text-slate-500">触发转移</p>
           <p className="text-xl font-bold text-amber-600 mt-1">{failoverLogs.length}</p>
         </div>
       </div>
 
       {/* Filters */}
-      <div className="bg-white rounded-xl border border-slate-200 px-5 py-3 flex items-center gap-4 flex-wrap">
+      <div className="motion-card bg-white rounded-xl border border-slate-200 px-5 py-3 flex items-center gap-4 flex-wrap">
         <div className="flex items-center gap-2">
           <Filter size={14} className="text-slate-400" />
           <span className="text-sm text-slate-600">筛选：</span>
@@ -85,7 +85,7 @@ export default function Logs() {
       </div>
 
       {/* Log Table */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[920px] text-sm">
             <thead>
@@ -100,16 +100,16 @@ export default function Logs() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredLogs.map(log => {
+              {filteredLogs.map((log, index) => {
                 const time = new Date(log.timestamp);
                 const dateStr = time.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
                 const timeStr = time.toLocaleTimeString('zh-CN');
                 const hasFailover = log.failedModels.length > 0;
                 return (
                   <tr key={log.id} className={cn(
-                    'hover:bg-slate-50 transition-colors',
+                    'table-row-motion hover:bg-slate-50 transition-colors',
                     log.status === 'failed' && 'bg-red-50/30'
-                  )}>
+                  )} style={{ animationDelay: `${Math.min(index, 16) * 20}ms` }}>
                     <td className="px-5 py-3 font-mono text-xs text-slate-500 whitespace-nowrap">
                       <span className="text-slate-400">{dateStr}</span> {timeStr}
                     </td>

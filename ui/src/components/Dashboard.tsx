@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store';
 import { cn } from '../utils/cn';
+import AnimatedGlyph from './AnimatedGlyph';
 
 function successRate(successes: number, failures: number) {
   const finished = successes + failures;
@@ -60,8 +61,8 @@ export default function Dashboard() {
     <div className="page-motion space-y-6">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
-            <Activity size={13} />
+          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
+            <AnimatedGlyph variant="overview" />
             Persisted Overview
           </div>
           <h2 className="mt-3 text-2xl font-bold text-slate-800">仪表盘</h2>

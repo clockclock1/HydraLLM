@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Menu, X } from 'lucide-react';
 import { StoreProvider, useStore } from './store';
 import Sidebar from './components/Sidebar';
@@ -11,6 +11,7 @@ import ProxyEndpoints from './components/ProxyEndpoints';
 import LiveStatus from './components/LiveStatus';
 import Logs from './components/Logs';
 import Login from './components/Login';
+import LoadingOverlay, { LoadingSpinner } from './components/Loading';
 
 function PageContent() {
   const { state } = useStore();
@@ -36,11 +37,29 @@ function PageContent() {
 function AppLayout() {
   const { state } = useStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [pageBusy, setPageBusy] = useState(false);
+
+  useEffect(() => {
+    if (!state.authenticated) return;
+    setPageBusy(true);
+    const timer = window.setTimeout(() => setPageBusy(false), 320);
+    return () => window.clearTimeout(timer);
+  }, [state.authenticated, state.currentPage]);
+
+  const busyLabel =
+    state.saveStatus === 'loading' ? '正在加载...' :
+    state.saveStatus === 'saving' ? '正在保存...' :
+    pageBusy ? '正在切换...' :
+    '';
+  const showBusyOverlay = Boolean(busyLabel);
 
   if (!state.authChecked) {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-slate-950 text-sm text-slate-300">
-        正在检查登录状态...
+        <div className="flex items-center gap-3">
+          <LoadingSpinner size="md" className="text-blue-400" />
+          <span>正在检查登录状态...</span>
+        </div>
       </div>
     );
   }
@@ -51,6 +70,7 @@ function AppLayout() {
 
   return (
     <div className="min-h-dvh bg-slate-100 md:flex md:h-screen md:overflow-hidden">
+      <LoadingOverlay show={showBusyOverlay} label={busyLabel} />
       <div className="hidden md:block">
         <Sidebar />
       </div>

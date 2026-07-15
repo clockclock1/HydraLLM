@@ -1,7 +1,8 @@
 import { FormEvent, useState } from 'react';
-import { LockKeyhole, Loader2 } from 'lucide-react';
+import { LockKeyhole } from 'lucide-react';
 import { useStore } from '../store';
 import { cn } from '../utils/cn';
+import { LoadingSpinner } from './Loading';
 
 export default function Login() {
   const { state, login } = useStore();
@@ -59,7 +60,7 @@ export default function Login() {
             'mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition-all hover:-translate-y-0.5 hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0'
           )}
         >
-          {busy && <Loader2 size={16} className="animate-spin" />}
+          {busy && <LoadingSpinner size="sm" />}
           登录
         </button>
       </form>

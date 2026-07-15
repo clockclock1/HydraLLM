@@ -14,12 +14,12 @@ import {
   Search,
   Check,
   AlertCircle,
-  Loader2,
 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useStore } from '../store';
 import type { Provider } from '../types';
 import { cn } from '../utils/cn';
+import LoadingOverlay, { LoadingSpinner } from './Loading';
 
 // Modal for adding/editing providers
 function ProviderModal({
@@ -161,6 +161,8 @@ function FetchModelsModal({
   );
 
   return (
+    <>
+    <LoadingOverlay show={loading} label="正在拉取模型..." />
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4" onClick={onClose}>
       <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-2xl shadow-2xl max-h-[94dvh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
@@ -192,7 +194,7 @@ function FetchModelsModal({
                 disabled={loading}
                 className="px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm flex-shrink-0"
               >
-                {loading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+                {loading ? <LoadingSpinner size="sm" /> : <Download size={16} />}
                 拉取
               </button>
             </div>
@@ -291,6 +293,7 @@ function FetchModelsModal({
         </div>
       </div>
     </div>
+    </>
   );
 }
 
@@ -342,8 +345,8 @@ export default function Providers() {
 
       {/* Provider Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {state.providers.map(provider => (
-          <div key={provider.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
+        {state.providers.map((provider, index) => (
+          <div key={provider.id} className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden hover:-translate-y-0.5 hover:shadow-md" style={{ animationDelay: `${index * 35}ms` }}>
             <div className="px-4 py-4 sm:px-5 border-b border-slate-100">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
@@ -368,7 +371,7 @@ export default function Providers() {
                     className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                     title="健康检查"
                   >
-                    <RefreshCw size={16} className={cn(checkingId === provider.id && 'animate-spin')} />
+                    {checkingId === provider.id ? <LoadingSpinner size="sm" className="text-blue-600" /> : <RefreshCw size={16} />}
                   </button>
                   <button
                     onClick={() => { setEditingProvider(provider); setShowAddModal(true); }}
@@ -438,7 +441,7 @@ export default function Providers() {
       </div>
 
       {state.providers.length === 0 && (
-        <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
+        <div className="motion-card text-center py-16 bg-white rounded-xl border border-slate-200">
           <Server size={40} className="mx-auto text-slate-300 mb-3" />
           <p className="text-slate-500">暂无提供商</p>
           <p className="text-xs text-slate-400 mt-1">点击上方按钮添加第一个 API 提供商</p>

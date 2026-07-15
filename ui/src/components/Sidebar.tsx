@@ -7,9 +7,6 @@ import {
   GitBranch,
   LayoutDashboard,
   Link2,
-  LogOut,
-  RefreshCw,
-  Save,
   ScrollText,
   Server,
   TestTube,
@@ -17,6 +14,7 @@ import {
 import { useStore } from '../store';
 import type { Page } from '../types';
 import { cn } from '../utils/cn';
+import AnimatedGlyph from './AnimatedGlyph';
 
 export const navItems: { page: Page; label: string; icon: ReactNode }[] = [
   { page: 'dashboard', label: '仪表盘', icon: <LayoutDashboard size={20} /> },
@@ -43,9 +41,9 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
         mobile && 'w-[82vw] max-w-80 shadow-2xl'
       )}
     >
-      <div className="flex h-16 items-center gap-3 border-b border-slate-700/50 px-4">
+      <div className="flex h-16 items-center justify-center gap-3 border-b border-slate-700/50 px-4">
         {!isCollapsed && (
-          <div className="overflow-hidden">
+          <div className="w-full overflow-hidden text-center">
             <h1 className="whitespace-nowrap text-sm font-bold">Failover Proxy</h1>
             <p className="whitespace-nowrap text-[10px] text-slate-400">模型故障转移代理</p>
           </div>
@@ -81,7 +79,7 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
               disabled={busy}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-slate-700/70 px-2 py-2 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50"
             >
-              <RefreshCw size={13} className={busy ? 'animate-spin' : ''} />
+              <AnimatedGlyph variant="load" className={busy ? 'animate-pulse' : ''} />
               加载
             </button>
             <button
@@ -89,7 +87,7 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
               disabled={busy}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-2 py-2 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
             >
-              <Save size={13} />
+              <AnimatedGlyph variant="save" />
               保存
             </button>
             <button
@@ -97,7 +95,7 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
               disabled={busy}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-slate-800 px-2 py-2 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50"
             >
-              <LogOut size={13} />
+              <AnimatedGlyph variant="logout" />
               退出
             </button>
           </div>

@@ -6,11 +6,9 @@ import {
   Circle,
   Eye,
   MessageSquareText,
-  Loader2,
   MousePointer2,
   Play,
   Search,
-  Sparkles,
   Square,
   TerminalSquare,
   Wrench,
@@ -19,6 +17,8 @@ import {
 import { useStore } from '../store';
 import type { ModelCapability, ModelCapabilityResult, ModelTestResult, ModelTestStatus, ModelTestTarget } from '../types';
 import { cn } from '../utils/cn';
+import AnimatedGlyph from './AnimatedGlyph';
+import { LoadingSpinner } from './Loading';
 
 const capabilityMeta: Record<ModelCapability, { label: string; short: string; desc: string; icon: React.ReactNode }> = {
   text: { label: '文本请求', short: '文本', desc: '基础单轮对话，检查 200 OK 和非空 message.content', icon: <MessageSquareText size={16} /> },
@@ -162,8 +162,8 @@ export default function ModelTests() {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-medium text-cyan-700">
-            <Sparkles size={13} />
+          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-medium text-cyan-700">
+            <AnimatedGlyph variant="lab" />
             Capability Lab
           </div>
           <h2 className="mt-3 text-2xl font-bold text-slate-800">模型能力测试</h2>
@@ -174,14 +174,14 @@ export default function ModelTests() {
           disabled={running || !selectedTargets.length || !selectedCapabilities.length}
           className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-cyan-200 transition-colors hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
         >
-          {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+          {running ? <LoadingSpinner size="sm" /> : <Play size={16} />}
           开始测试 {selectedTargets.length ? `(${selectedTargets.length})` : ''}
         </button>
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_1fr]">
         <section className="space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="motion-card rounded-xl border border-slate-200 bg-white p-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-slate-800">测试项目</h3>
               <span className="text-xs text-slate-400">已选 {capabilities.size} 项</span>
@@ -212,7 +212,7 @@ export default function ModelTests() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="motion-card rounded-xl border border-slate-200 bg-white p-4" style={{ animationDelay: '50ms' }}>
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-slate-800">选择模型</h3>
               <span className="text-xs text-slate-400">{selected.size} / {targets.length}</span>
@@ -231,16 +231,17 @@ export default function ModelTests() {
               <button onClick={clearSelection} className="text-slate-500 hover:text-slate-700">清空选择</button>
             </div>
             <div className="mt-3 max-h-[460px] space-y-2 overflow-y-auto pr-1">
-              {filteredTargets.map(target => {
+              {filteredTargets.map((target, index) => {
                 const active = selected.has(target.id);
                 return (
                   <button
                     key={target.id}
                     onClick={() => toggleTarget(target.id)}
                     className={cn(
-                      'w-full rounded-lg border p-3 text-left transition-all',
+                      'table-row-motion w-full rounded-lg border p-3 text-left transition-all',
                       active ? 'border-cyan-300 bg-cyan-50' : 'border-slate-200 bg-white hover:bg-slate-50'
                     )}
+                    style={{ animationDelay: `${Math.min(index, 14) * 18}ms` }}
                   >
                     <div className="flex items-start gap-3">
                       <span className={cn(
@@ -283,7 +284,7 @@ export default function ModelTests() {
               <p className="text-xs text-amber-700">不确定</p>
               <p className="mt-1 text-2xl font-bold text-amber-800">{summary.uncertain}</p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="motion-card rounded-xl border border-slate-200 bg-white p-4">
               <p className="text-xs text-slate-500">测试模型</p>
               <p className="mt-1 text-2xl font-bold text-slate-800">{results.length}</p>
             </div>
@@ -296,7 +297,7 @@ export default function ModelTests() {
             </div>
           )}
 
-          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="motion-card overflow-hidden rounded-xl border border-slate-200 bg-white" style={{ animationDelay: '90ms' }}>
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
               <div>
                 <h3 className="font-semibold text-slate-800">测试结果</h3>
@@ -304,7 +305,7 @@ export default function ModelTests() {
               </div>
               {running && (
                 <span className="inline-flex items-center gap-2 text-sm text-cyan-700">
-                  <Loader2 size={15} className="animate-spin" />
+                  <LoadingSpinner size="sm" />
                   正在测试
                 </span>
               )}
@@ -325,7 +326,7 @@ export default function ModelTests() {
                   {results.map(result => {
                     const byCapability = new Map(result.results.map(item => [item.capability, item]));
                     return (
-                      <tr key={`${result.providerId}-${result.modelName}`} className="align-top">
+                      <tr key={`${result.providerId}-${result.modelName}`} className="table-row-motion align-top">
                         <td className="px-5 py-4">
                           <p className="font-mono font-medium text-slate-800">{result.modelName}</p>
                           <p className="mt-1 text-xs text-slate-500">{result.providerName}</p>

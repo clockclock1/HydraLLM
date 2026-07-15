@@ -42,6 +42,11 @@ body {
   overflow-x: hidden;
 }
 
+svg {
+  display: block;
+  flex-shrink: 0;
+}
+
 button,
 a,
 input,
@@ -101,8 +106,69 @@ button:active {
   }
 }
 
+/* Copied from loading-comp's global overlay and 3D double-border loader, with React class names. */
+.loading-comp-global-react {
+  background: #0003;
+  overflow: visible !important;
+}
+
+.loading-comp-react {
+  --loading-comp-core: 1rem;
+  --loading-comp-border: 1rem;
+  display: inline-block;
+  width: var(--loading-comp-core);
+  height: var(--loading-comp-core);
+  border: var(--loading-comp-border) double;
+  border-radius: 15%;
+  animation: loading-comp-rotate 3s ease infinite;
+  box-shadow: 0 0 0.8rem 0.2rem currentColor;
+  perspective: 20rem;
+  transform-style: preserve-3d;
+}
+
+.loading-comp-react-sm {
+  --loading-comp-core: 0.28rem;
+  --loading-comp-border: 0.28rem;
+  box-shadow: 0 0 0.24rem 0.06rem currentColor;
+}
+
+.loading-comp-react-md {
+  --loading-comp-core: 0.58rem;
+  --loading-comp-border: 0.58rem;
+  box-shadow: 0 0 0.45rem 0.12rem currentColor;
+}
+
+.loading-comp-react-lg {
+  --loading-comp-core: 1rem;
+  --loading-comp-border: 1rem;
+}
+
+.loading-comp-panel {
+  transition:
+    opacity 260ms ease,
+    transform 260ms ease;
+}
+
+@keyframes loading-comp-rotate {
+  0% {
+    transform: rotate(0) rotateX(0) rotateY(0);
+  }
+  25% {
+    transform: rotate(45deg) rotateX(-45deg) rotateY(45deg);
+  }
+  50% {
+    transform: rotate(0) rotateX(-180deg) rotateY(180deg);
+  }
+  75% {
+    transform: rotate(45deg) rotateX(-45deg) rotateY(-45deg);
+  }
+  100% {
+    transform: rotate(180deg) rotateX(180deg) rotateY(-180deg);
+  }
+}
+
 .page-motion {
-  animation: page-enter 360ms ease both;
+  animation: page-enter 360ms ease backwards;
 }
 
 .motion-card {

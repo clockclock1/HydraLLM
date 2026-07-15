@@ -1,11 +1,42 @@
-import { Activity, AlertTriangle, BarChart3, CheckCircle2, Gauge, Server, XCircle } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, Gauge, Server, XCircle } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useStore } from '../store';
 import type { ChannelModelStats } from '../types';
 import { cn } from '../utils/cn';
+import AnimatedGlyph from './AnimatedGlyph';
+
+type ModelStatsSortKey = 'name' | 'requests' | 'successes' | 'failures' | 'successRate' | 'updatedAt';
+type ModelStatsSortDirection = 'asc' | 'desc';
+type ModelStatsRow = ChannelModelStats['models'][string];
+
+const sortLabels: Record<ModelStatsSortKey, string> = {
+  name: '模型',
+  requests: '总数',
+  successes: '成功',
+  failures: '失败',
+  successRate: '成功率',
+  updatedAt: '最近',
+};
 
 function pct(successes: number, total: number) {
   return total ? Number(((successes / total) * 100).toFixed(1)) : 100;
+}
+
+function compareModelStats(a: ModelStatsRow, b: ModelStatsRow, sortKey: ModelStatsSortKey, sortDirection: ModelStatsSortDirection) {
+  const direction = sortDirection === 'asc' ? 1 : -1;
+
+  if (sortKey === 'name') {
+    return a.name.localeCompare(b.name) * direction;
+  }
+
+  const valueOf = (model: ModelStatsRow) => {
+    if (sortKey === 'successRate') return pct(model.successes, model.requests);
+    return Number(model[sortKey] || 0);
+  };
+
+  const diff = valueOf(a) - valueOf(b);
+  if (diff !== 0) return diff * direction;
+  return a.name.localeCompare(b.name);
 }
 
 function StatTile({ label, value, sub, tone }: { label: string; value: string; sub: string; tone: string }) {
@@ -18,8 +49,56 @@ function StatTile({ label, value, sub, tone }: { label: string; value: string; s
   );
 }
 
-function ChannelBlock({ channel, index }: { channel: ChannelModelStats; index: number }) {
-  const models = Object.values(channel.models || {}).sort((a, b) => b.requests - a.requests || a.name.localeCompare(b.name));
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  align = 'right',
+  onSort,
+}: {
+  label: string;
+  sortKey: ModelStatsSortKey;
+  activeKey: ModelStatsSortKey;
+  direction: ModelStatsSortDirection;
+  align?: 'left' | 'right';
+  onSort: (key: ModelStatsSortKey) => void;
+}) {
+  const active = activeKey === sortKey;
+  const Icon = active ? (direction === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown;
+
+  return (
+    <th className={cn('px-5 py-3 font-medium', align === 'left' ? 'text-left' : 'text-right')}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-slate-100 hover:text-slate-700',
+          align === 'right' && 'ml-auto',
+          active ? 'text-blue-700' : 'text-slate-500'
+        )}
+      >
+        <span>{label}</span>
+        <Icon size={12} aria-hidden="true" />
+      </button>
+    </th>
+  );
+}
+
+function ChannelBlock({
+  channel,
+  index,
+  sortKey,
+  sortDirection,
+  onSort,
+}: {
+  channel: ChannelModelStats;
+  index: number;
+  sortKey: ModelStatsSortKey;
+  sortDirection: ModelStatsSortDirection;
+  onSort: (key: ModelStatsSortKey) => void;
+}) {
+  const models = Object.values(channel.models || {}).sort((a, b) => compareModelStats(a, b, sortKey, sortDirection));
   const successRate = pct(channel.successes, channel.requests);
 
   return (
@@ -60,15 +139,15 @@ function ChannelBlock({ channel, index }: { channel: ChannelModelStats; index: n
       </div>
 
       <div className="max-h-[520px] overflow-auto">
-        <table className="w-full min-w-[720px] text-sm">
+        <table className="w-full min-w-[760px] text-sm">
           <thead className="sticky top-0 z-10 bg-white text-xs text-slate-500 shadow-[0_1px_0_#e2e8f0]">
             <tr>
-              <th className="px-5 py-3 text-left font-medium">模型</th>
-              <th className="px-5 py-3 text-right font-medium">总数</th>
-              <th className="px-5 py-3 text-right font-medium">成功</th>
-              <th className="px-5 py-3 text-right font-medium">失败</th>
-              <th className="px-5 py-3 text-right font-medium">成功率</th>
-              <th className="px-5 py-3 text-right font-medium">最近</th>
+              <SortHeader label={sortLabels.name} sortKey="name" activeKey={sortKey} direction={sortDirection} align="left" onSort={onSort} />
+              <SortHeader label={sortLabels.requests} sortKey="requests" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+              <SortHeader label={sortLabels.successes} sortKey="successes" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+              <SortHeader label={sortLabels.failures} sortKey="failures" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+              <SortHeader label={sortLabels.successRate} sortKey="successRate" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
+              <SortHeader label={sortLabels.updatedAt} sortKey="updatedAt" activeKey={sortKey} direction={sortDirection} onSort={onSort} />
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
@@ -120,6 +199,8 @@ function ChannelBlock({ channel, index }: { channel: ChannelModelStats; index: n
 export default function ModelStats() {
   const { state } = useStore();
   const [query, setQuery] = useState('');
+  const [sortKey, setSortKey] = useState<ModelStatsSortKey>('requests');
+  const [sortDirection, setSortDirection] = useState<ModelStatsSortDirection>('desc');
   const stats = state.backendStats;
   const channels = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -134,23 +215,51 @@ export default function ModelStats() {
   }, [stats?.channelModels, query]);
   const totalModels = channels.reduce((sum, channel) => sum + Object.keys(channel.models || {}).length, 0);
 
+  const handleSort = (nextKey: ModelStatsSortKey) => {
+    if (sortKey === nextKey) {
+      setSortDirection(current => current === 'asc' ? 'desc' : 'asc');
+      return;
+    }
+    setSortKey(nextKey);
+    setSortDirection(nextKey === 'name' ? 'asc' : 'desc');
+  };
+
   return (
     <div className="page-motion space-y-6">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
-            <BarChart3 size={13} />
+          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
+            <AnimatedGlyph variant="stats" />
             Persistent Statistics
           </div>
           <h2 className="mt-3 text-2xl font-bold text-slate-800">模型统计</h2>
           <p className="mt-1 text-slate-500">按渠道分块查看各模型的持久化成功、失败与总请求数。</p>
         </div>
-        <input
-          value={query}
-          onChange={event => setQuery(event.target.value)}
-          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition-all duration-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 xl:w-80"
-          placeholder="搜索渠道、地址或模型"
-        />
+        <div className="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
+          <select
+            value={`${sortKey}:${sortDirection}`}
+            onChange={event => {
+              const [nextKey, nextDirection] = event.target.value.split(':') as [ModelStatsSortKey, ModelStatsSortDirection];
+              setSortKey(nextKey);
+              setSortDirection(nextDirection);
+            }}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition-all duration-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+          >
+            <option value="requests:desc">总数从高到低</option>
+            <option value="requests:asc">总数从低到高</option>
+            <option value="successes:desc">成功从高到低</option>
+            <option value="failures:desc">失败从高到低</option>
+            <option value="successRate:desc">成功率从高到低</option>
+            <option value="updatedAt:desc">最近更新优先</option>
+            <option value="name:asc">模型名 A-Z</option>
+          </select>
+          <input
+            value={query}
+            onChange={event => setQuery(event.target.value)}
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition-all duration-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 xl:w-80"
+            placeholder="搜索渠道、地址或模型"
+          />
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
@@ -161,7 +270,16 @@ export default function ModelStats() {
       </div>
 
       <div className="space-y-4">
-        {channels.map((channel, index) => <ChannelBlock key={channel.name} channel={channel} index={index} />)}
+        {channels.map((channel, index) => (
+          <ChannelBlock
+            key={channel.name}
+            channel={channel}
+            index={index}
+            sortKey={sortKey}
+            sortDirection={sortDirection}
+            onSort={handleSort}
+          />
+        ))}
         {!channels.length && (
           <div className="motion-card rounded-xl border border-dashed border-slate-200 bg-white py-16 text-center">
             <Activity size={36} className="mx-auto text-slate-300" />
