@@ -581,7 +581,7 @@ function shouldTryNext(statusCode, cfg) {
   return status >= 400 || cfg.failoverStatusCodes.includes(status);
 }
 
-function classifyUpstreamFailure(statusCode, text, responseOk) {
+function classifyUpstreamFailure(statusCode, text, responseOk, options = {}) {
   const status = Number(statusCode || 0);
   const body = String(text || "");
   const parsed = parseJsonSafe(body);
@@ -606,6 +606,11 @@ function classifyUpstreamFailure(statusCode, text, responseOk) {
       message: embedded.message,
       body: trimError(body)
     };
+  }
+
+  if (options.validateEmptyOutput) {
+    const emptyOutputFailure = validateAssistantOutput(body);
+    if (emptyOutputFailure) return emptyOutputFailure;
   }
 
   return null;
@@ -1099,6 +1104,8 @@ function assistantText(payload) {
       .map((item) => typeof item === "string" ? item : item?.text || item?.content || "")
       .join("\n");
   }
+  const completionText = payload?.choices?.[0]?.text;
+  if (typeof completionText === "string") return completionText;
   if (typeof payload?.output_text === "string") return payload.output_text;
   if (Array.isArray(payload?.output)) {
     return payload.output
@@ -1111,10 +1118,64 @@ function assistantText(payload) {
 
 function assistantToolCalls(payload) {
   const message = payload?.choices?.[0]?.message || {};
+  const outputCalls = Array.isArray(payload?.output)
+    ? payload.output.filter((item) => {
+      const type = String(item?.type || "");
+      return type.includes("tool") || type.includes("function_call");
+    })
+    : [];
   return [
     ...(Array.isArray(message.tool_calls) ? message.tool_calls : []),
-    ...(Array.isArray(payload?.tool_calls) ? payload.tool_calls : [])
+    ...(Array.isArray(payload?.tool_calls) ? payload.tool_calls : []),
+    ...outputCalls
   ];
+}
+
+function assistantReasoningText(payload) {
+  const message = payload?.choices?.[0]?.message || {};
+  const reasoning = message.reasoning_content || message.reasoning;
+  if (typeof reasoning === "string") return reasoning;
+  if (Array.isArray(reasoning)) {
+    return reasoning.map((item) => typeof item === "string" ? item : item?.text || item?.content || "").join("\n");
+  }
+  if (Array.isArray(payload?.output)) {
+    return payload.output
+      .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+      .map((item) => item?.reasoning || item?.summary || "")
+      .join("\n");
+  }
+  return "";
+}
+
+function validateAssistantOutput(text) {
+  const raw = String(text || "");
+  if (!raw.trim()) {
+    return {
+      status: 502,
+      retryable: true,
+      message: "Upstream returned an empty response body",
+      body: ""
+    };
+  }
+
+  const payload = normalizeChatPayload(raw);
+  if (!payload || embeddedError(payload, raw).message) return null;
+  if (assistantToolCalls(payload).length > 0) return null;
+
+  const content = assistantText(payload).trim();
+  const reasoning = assistantReasoningText(payload).trim();
+  if (content || reasoning) return null;
+
+  const usage = usageFromPayload(payload);
+  const usageHint = usage.completionTokens || usage.totalTokens
+    ? ` completion_tokens=${usage.completionTokens}, total_tokens=${usage.totalTokens}`
+    : "";
+  return {
+    status: 502,
+    retryable: true,
+    message: `Upstream returned empty assistant output${usageHint}`,
+    body: trimError(raw)
+  };
 }
 
 async function testTextCompletion(target) {
@@ -1654,7 +1715,7 @@ async function handleProxy(req, res, pathname, cfg) {
 
       if (!isStream) {
         const text = await upstream.text().catch(() => "");
-        const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok);
+        const failure = classifyUpstreamFailure(upstream.status, text, upstream.ok, { validateEmptyOutput: true });
         if (failure) {
           appendProxyThreadError(proxyThread, {
             target: targetLabel(target),
