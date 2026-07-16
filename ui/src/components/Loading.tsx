@@ -40,12 +40,12 @@ export default function LoadingOverlay({
     >
       <div
         className={cn(
-          'loading-comp-panel flex min-w-40 flex-col items-center gap-3 rounded-2xl border border-white/60 bg-white/95 px-6 py-5 text-blue-700 shadow-2xl shadow-slate-950/20',
+          'flex flex-col items-center gap-4 text-white transition-all duration-300',
           show ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-2 scale-95 opacity-0'
         )}
       >
         <LoadingSpinner size="lg" />
-        <span className="text-sm font-semibold text-slate-700">{label}</span>
+        {label && <span className="text-sm font-semibold tracking-wide text-white/90">{label}</span>}
       </div>
     </div>
   );

@@ -1,10 +1,16 @@
 import { FormEvent, useState } from 'react';
-import { LockKeyhole } from 'lucide-react';
+import { LockKeyhole, Moon, Sun } from 'lucide-react';
 import { useStore } from '../store';
 import { cn } from '../utils/cn';
 import { LoadingSpinner } from './Loading';
 
-export default function Login() {
+export default function Login({
+  theme,
+  onToggleTheme,
+}: {
+  theme: 'dark' | 'light';
+  onToggleTheme: () => void;
+}) {
   const { state, login } = useStore();
   const [token, setToken] = useState('');
   const [error, setError] = useState('');
@@ -21,11 +27,19 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-slate-950 px-3 py-6 sm:px-4">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(37,99,235,0.22),transparent_34%),radial-gradient(circle_at_78%_12%,rgba(20,184,166,0.14),transparent_30%),linear-gradient(135deg,#020617,#0f172a_48%,#111827)]" />
+    <div data-theme={theme} className="uiverse-login flex min-h-dvh items-center justify-center bg-slate-950 px-3 py-6 sm:px-4">
+      <div className="uiverse-login-backdrop absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(37,99,235,0.22),transparent_34%),radial-gradient(circle_at_78%_12%,rgba(20,184,166,0.14),transparent_30%),linear-gradient(135deg,#020617,#0f172a_48%,#111827)]" />
+      <button
+        type="button"
+        onClick={onToggleTheme}
+        className="uiverse-theme-toggle absolute right-4 top-4 z-10 flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white/10 text-slate-100 backdrop-blur transition-colors hover:bg-white/20"
+        aria-label={theme === 'dark' ? '切换亮色模式' : '切换暗色模式'}
+      >
+        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
       <form
         onSubmit={handleSubmit}
-        className="page-motion relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-5 shadow-2xl shadow-blue-950/30 backdrop-blur sm:p-7"
+        className="uiverse-login-card page-motion relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-5 shadow-2xl shadow-blue-950/30 backdrop-blur sm:p-7"
       >
         <div className="mb-6">
           <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-600/25">

@@ -7,8 +7,10 @@ import {
   GitBranch,
   LayoutDashboard,
   Link2,
+  Moon,
   ScrollText,
   Server,
+  Sun,
   TestTube,
 } from 'lucide-react';
 import { useStore } from '../store';
@@ -27,7 +29,17 @@ export const navItems: { page: Page; label: string; icon: ReactNode }[] = [
   { page: 'logs', label: '请求日志', icon: <ScrollText size={20} /> },
 ];
 
-export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?: () => void }) {
+export default function Sidebar({
+  mobile = false,
+  onNavigate,
+  theme,
+  onToggleTheme,
+}: {
+  mobile?: boolean;
+  onNavigate?: () => void;
+  theme: 'dark' | 'light';
+  onToggleTheme: () => void;
+}) {
   const { state, dispatch, loadConfig, saveConfig, logout } = useStore();
   const collapsed = state.sidebarCollapsed;
   const busy = state.saveStatus === 'loading' || state.saveStatus === 'saving';
@@ -36,7 +48,7 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
   return (
     <aside
       className={cn(
-        'h-dvh bg-gradient-to-b from-slate-900 to-slate-800 text-white flex flex-col transition-all duration-300 border-r border-slate-700/50 flex-shrink-0',
+        'uiverse-sidebar h-dvh bg-gradient-to-b from-slate-900 to-slate-800 text-white flex flex-col transition-all duration-300 border-r border-slate-700/50 flex-shrink-0',
         isCollapsed ? 'w-16' : 'w-64',
         mobile && 'w-[82vw] max-w-80 shadow-2xl'
       )}
@@ -73,6 +85,14 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
 
       {!isCollapsed && (
         <div className="space-y-2 border-t border-slate-700/50 px-3 py-3">
+          <button
+            type="button"
+            onClick={onToggleTheme}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700/50 bg-slate-800/60 px-3 py-2 text-xs text-slate-200 hover:bg-slate-700"
+          >
+            {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+            {theme === 'dark' ? '亮色模式' : '暗色模式'}
+          </button>
           <div className="grid grid-cols-3 gap-2">
             <button
               onClick={() => loadConfig().catch(() => undefined)}
@@ -115,6 +135,16 @@ export default function Sidebar({ mobile = false, onNavigate }: { mobile?: boole
 
       {!mobile && (
       <div className="border-t border-slate-700/50 p-2">
+        {isCollapsed && (
+          <button
+            type="button"
+            onClick={onToggleTheme}
+            className="mb-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-700/50 hover:text-white"
+            aria-label={theme === 'dark' ? '切换亮色模式' : '切换暗色模式'}
+          >
+            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+        )}
         <button
           onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
           className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-700/50 hover:text-white"

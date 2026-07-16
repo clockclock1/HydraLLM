@@ -184,8 +184,8 @@ export default function ProxyEndpoints() {
                 {copiedId === 'curl' ? <><CheckCircle2 size={12} className="text-emerald-500" /> 已复制</> : <><Copy size={12} /> 复制</>}
               </button>
             </div>
-            <div className="p-4 bg-slate-900 text-slate-300 text-xs font-mono leading-relaxed overflow-x-auto">
-              <pre>{`curl ${baseEndpoint}/chat/completions \\
+            <div className="uiverse-code-sample p-4 bg-slate-900 text-slate-300 text-xs font-mono leading-relaxed overflow-x-auto">
+              <pre className="uiverse-code-pre">{`curl ${baseEndpoint}/chat/completions \\
   -H "Authorization: Bearer ${selectedChain.proxyApiKey.slice(0, 8)}..." \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -214,8 +214,8 @@ export default function ProxyEndpoints() {
                 {copiedId === 'python' ? <><CheckCircle2 size={12} className="text-emerald-500" /> 已复制</> : <><Copy size={12} /> 复制</>}
               </button>
             </div>
-            <div className="p-4 bg-slate-900 text-slate-300 text-xs font-mono leading-relaxed overflow-x-auto">
-              <pre>{`from openai import OpenAI
+            <div className="uiverse-code-sample p-4 bg-slate-900 text-slate-300 text-xs font-mono leading-relaxed overflow-x-auto">
+              <pre className="uiverse-code-pre">{`from openai import OpenAI
 
 client = OpenAI(
     base_url="${baseEndpoint}",

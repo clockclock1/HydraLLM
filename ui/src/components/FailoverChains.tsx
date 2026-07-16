@@ -547,7 +547,7 @@ function ChainEditor({
         </div>
 
         <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3 flex-shrink-0">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
             取消
           </button>
           <button

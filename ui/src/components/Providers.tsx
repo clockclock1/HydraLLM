@@ -98,7 +98,7 @@ function ProviderModal({
           </div>
         </div>
         <div className="px-4 py-3 sm:px-6 sm:py-4 border-t border-slate-100 flex justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
             取消
           </button>
           <button
@@ -164,7 +164,7 @@ function FetchModelsModal({
     <>
     <LoadingOverlay show={loading} label="正在拉取模型..." />
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-2xl shadow-2xl max-h-[94dvh] flex flex-col" onClick={e => e.stopPropagation()}>
+      <div className="uiverse-fetch-models-modal bg-white rounded-xl sm:rounded-2xl w-full max-w-2xl shadow-2xl max-h-[94dvh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
           <div>
             <h3 className="font-semibold text-slate-800">拉取模型列表</h3>
@@ -232,7 +232,7 @@ function FetchModelsModal({
                 />
               </div>
 
-              <div className="border border-slate-200 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+              <div className="uiverse-model-picker-list border border-slate-200 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
                 {filteredModels.map(model => {
                   const isSelected = selectedModels.has(model);
                   const isChat = !model.includes('embed') && !model.includes('whisper') && !model.includes('tts') && !model.includes('dall');
@@ -241,7 +241,7 @@ function FetchModelsModal({
                       key={model}
                       onClick={() => toggleModel(model)}
                       className={cn(
-                        'w-full flex items-center justify-between gap-3 px-3 sm:px-4 py-2.5 text-sm border-b border-slate-50 last:border-b-0 transition-colors',
+                        'uiverse-model-option w-full flex items-center justify-between gap-3 px-3 sm:px-4 py-2.5 text-sm border-b border-slate-50 last:border-b-0 transition-colors',
                         isSelected ? 'bg-blue-50' : 'hover:bg-slate-50'
                       )}
                     >
@@ -259,7 +259,7 @@ function FetchModelsModal({
                         </span>
                       </div>
                       <span className={cn(
-                        'text-[10px] px-2 py-0.5 rounded-full',
+                        'uiverse-model-kind text-[10px] px-2 py-0.5 rounded-full',
                         isChat ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'
                       )}>
                         {isChat ? 'Chat' : 'Other'}
@@ -277,7 +277,7 @@ function FetchModelsModal({
         </div>
 
         <div className="px-4 py-3 sm:px-6 sm:py-4 border-t border-slate-100 flex justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-slate-600 hover:text-slate-800 transition-colors">
             取消
           </button>
           <button

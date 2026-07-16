@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Menu, X } from 'lucide-react';
+import { Menu, Moon, Sun, X } from 'lucide-react';
 import { StoreProvider, useStore } from './store';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
@@ -12,6 +12,15 @@ import LiveStatus from './components/LiveStatus';
 import Logs from './components/Logs';
 import Login from './components/Login';
 import LoadingOverlay, { LoadingSpinner } from './components/Loading';
+
+type ThemeMode = 'dark' | 'light';
+
+function initialTheme(): ThemeMode {
+  if (typeof window === 'undefined') return 'dark';
+  const saved = window.localStorage.getItem('hydrallm-theme');
+  if (saved === 'light' || saved === 'dark') return saved;
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
 
 function PageContent() {
   const { state } = useStore();
@@ -38,6 +47,15 @@ function AppLayout() {
   const { state } = useStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [pageBusy, setPageBusy] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>(initialTheme);
+
+  useEffect(() => {
+    window.localStorage.setItem('hydrallm-theme', theme);
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
+
+  const toggleTheme = () => setTheme(current => current === 'dark' ? 'light' : 'dark');
 
   useEffect(() => {
     if (!state.authenticated) return;
@@ -55,7 +73,7 @@ function AppLayout() {
 
   if (!state.authChecked) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-slate-950 text-sm text-slate-300">
+      <div data-theme={theme} className="uiverse-login flex min-h-dvh items-center justify-center bg-slate-950 text-sm text-slate-300">
         <div className="flex items-center gap-3">
           <LoadingSpinner size="md" className="text-blue-400" />
           <span>正在检查登录状态...</span>
@@ -65,17 +83,17 @@ function AppLayout() {
   }
 
   if (!state.authenticated) {
-    return <Login />;
+    return <Login theme={theme} onToggleTheme={toggleTheme} />;
   }
 
   return (
-    <div className="min-h-dvh bg-slate-100 md:flex md:h-screen md:overflow-hidden">
+    <div data-theme={theme} className="uiverse-shell min-h-dvh bg-slate-100 md:flex md:h-screen md:overflow-hidden">
       <LoadingOverlay show={showBusyOverlay} label={busyLabel} />
       <div className="hidden md:block">
-        <Sidebar />
+        <Sidebar theme={theme} onToggleTheme={toggleTheme} />
       </div>
 
-      <header className="sticky top-0 z-40 flex h-14 items-center justify-between border-b border-slate-200 bg-white/95 px-3 shadow-sm backdrop-blur md:hidden">
+      <header className="uiverse-topbar sticky top-0 z-40 flex h-14 items-center justify-between border-b border-slate-200 bg-white/95 px-3 shadow-sm backdrop-blur md:hidden">
         <button
           type="button"
           onClick={() => setMobileMenuOpen(true)}
@@ -88,7 +106,14 @@ function AppLayout() {
           <p className="truncate text-sm font-bold text-slate-900">Failover Proxy</p>
           <p className="truncate text-[11px] text-slate-500">模型故障转移代理</p>
         </div>
-        <div className="h-10 w-10" />
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="uiverse-theme-toggle flex h-10 w-10 items-center justify-center rounded-lg text-slate-700 transition-colors hover:bg-slate-100"
+          aria-label={theme === 'dark' ? '切换亮色模式' : '切换暗色模式'}
+        >
+          {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+        </button>
       </header>
 
       {mobileMenuOpen && (
@@ -101,7 +126,7 @@ function AppLayout() {
           />
           <div className="pointer-events-none relative h-full">
             <div className="pointer-events-auto">
-              <Sidebar mobile onNavigate={() => setMobileMenuOpen(false)} />
+              <Sidebar mobile onNavigate={() => setMobileMenuOpen(false)} theme={theme} onToggleTheme={toggleTheme} />
             </div>
             <button
               type="button"
