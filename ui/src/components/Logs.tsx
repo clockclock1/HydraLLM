@@ -87,7 +87,16 @@ export default function Logs() {
       {/* Log Table */}
       <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[920px] text-sm">
+          <table className="w-full min-w-[1180px] table-fixed text-sm">
+            <colgroup>
+              <col className="w-[150px]" />
+              <col className="w-[150px]" />
+              <col className="w-[180px]" />
+              <col />
+              <col className="w-[110px]" />
+              <col className="w-[90px]" />
+              <col className="w-[180px]" />
+            </colgroup>
             <thead>
               <tr className="bg-slate-50 text-slate-500 text-xs">
                 <th className="text-left px-5 py-3 font-medium">时间</th>
@@ -113,18 +122,31 @@ export default function Logs() {
                     <td className="px-5 py-3 font-mono text-xs text-slate-500 whitespace-nowrap">
                       <span className="text-slate-400">{dateStr}</span> {timeStr}
                     </td>
-                    <td className="px-5 py-3 text-slate-700 whitespace-nowrap">{log.chainName}</td>
-                    <td className="px-5 py-3">
-                      <span className="text-xs font-mono bg-slate-100 px-2 py-0.5 rounded text-slate-600">{log.originalModel}</span>
+                    <td className="px-5 py-3 text-slate-700">
+                      <span className="block truncate whitespace-nowrap" title={log.chainName}>{log.chainName}</span>
                     </td>
                     <td className="px-5 py-3">
-                      <div className="flex items-center gap-1 flex-wrap">
+                      <span
+                        className="inline-flex max-w-full items-center rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600"
+                        title={log.originalModel}
+                      >
+                        <span className="block truncate whitespace-nowrap">{log.originalModel}</span>
+                      </span>
+                    </td>
+                    <td className="px-5 py-3">
+                      <div className="flex min-w-0 items-center gap-1 overflow-hidden">
                         {log.failedModels.map((m, i) => (
-                          <span key={i} className="text-[11px] bg-red-50 text-red-500 px-1.5 py-0.5 rounded line-through font-mono">{m}</span>
+                          <span
+                            key={i}
+                            className="inline-flex max-w-[150px] shrink-0 rounded bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-500 line-through"
+                            title={m}
+                          >
+                            <span className="block truncate whitespace-nowrap">{m}</span>
+                          </span>
                         ))}
-                        {hasFailover && <ArrowRight size={10} className="text-slate-300" />}
+                        {hasFailover && <ArrowRight size={10} className="shrink-0 text-slate-300" />}
                         <span className={cn(
-                          'text-[11px] px-1.5 py-0.5 rounded font-mono',
+                          'inline-flex min-w-0 max-w-[220px] truncate whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[11px]',
                           log.status === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
                         )}>
                           {log.finalModel || '全部失败'}

@@ -142,6 +142,28 @@ const defaultConfig: BackendConfig = {
   models: [],
 };
 
+const ADMIN_SESSION_KEY = 'adminSession';
+
+function getStoredAdminSession() {
+  if (typeof window === 'undefined') return '';
+  const localSession = window.localStorage.getItem(ADMIN_SESSION_KEY) || '';
+  const legacySession = window.sessionStorage.getItem(ADMIN_SESSION_KEY) || '';
+  if (!localSession && legacySession) {
+    window.localStorage.setItem(ADMIN_SESSION_KEY, legacySession);
+  }
+  return localSession || legacySession;
+}
+
+function setStoredAdminSession(session: string) {
+  window.localStorage.setItem(ADMIN_SESSION_KEY, session);
+  window.sessionStorage.removeItem(ADMIN_SESSION_KEY);
+}
+
+function clearStoredAdminSession() {
+  window.localStorage.removeItem(ADMIN_SESSION_KEY);
+  window.sessionStorage.removeItem(ADMIN_SESSION_KEY);
+}
+
 const initialState: State = {
   currentPage: 'dashboard',
   sidebarCollapsed: false,
@@ -150,7 +172,7 @@ const initialState: State = {
   logs: [],
   activeThreads: [],
   adminToken: '',
-  adminSession: sessionStorage.getItem('adminSession') || '',
+  adminSession: getStoredAdminSession(),
   authenticated: false,
   authChecked: false,
   configLoaded: false,
@@ -198,10 +220,10 @@ function reducer(state: State, action: Action): State {
     case 'SET_ADMIN_TOKEN':
       return { ...state, adminToken: action.token };
     case 'SET_ADMIN_SESSION':
-      sessionStorage.setItem('adminSession', action.session);
-      return { ...state, adminSession: action.session, authenticated: true, authChecked: true };
+      setStoredAdminSession(action.session);
+      return { ...state, adminSession: action.session, authenticated: false, authChecked: true };
     case 'CLEAR_AUTH':
-      sessionStorage.removeItem('adminSession');
+      clearStoredAdminSession();
       return {
         ...state,
         adminSession: '',
@@ -537,7 +559,7 @@ const StoreContext = createContext<{
   saveConfig: () => Promise<void>;
   fetchProviderModels: (url: string, apiKey: string) => Promise<string[]>;
   refreshProviderHealth: () => Promise<void>;
-  runModelTests: (targets: ModelTestTarget[], capabilities: ModelCapability[]) => Promise<ModelTestResult[]>;
+  runModelTests: (targets: ModelTestTarget[], capabilities: ModelCapability[], signal?: AbortSignal) => Promise<ModelTestResult[]>;
 } | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
@@ -680,13 +702,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_PROVIDER_HEALTHS', providers: body.providers || [] });
   }, [state.configLoaded, providerHealthRequest, adminHeaders, handleUnauthorized]);
 
-  const runModelTests = useCallback(async (targets: ModelTestTarget[], capabilities: ModelCapability[]) => {
+  const runModelTests = useCallback(async (targets: ModelTestTarget[], capabilities: ModelCapability[], signal?: AbortSignal) => {
     const res = await fetch('/api/model-tests/run', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...adminHeaders(),
       },
+      signal,
       body: JSON.stringify({ targets, capabilities }),
     });
     handleUnauthorized(res);

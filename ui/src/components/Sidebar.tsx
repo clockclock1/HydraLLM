@@ -99,7 +99,7 @@ export default function Sidebar({
               disabled={busy}
               className="flex items-center justify-center gap-1.5 rounded-lg bg-slate-700/70 px-2 py-2 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50"
             >
-              <AnimatedGlyph variant="load" className={busy ? 'animate-pulse' : ''} />
+              <AnimatedGlyph variant="load" className={busy ? 'live-glyph-active' : ''} />
               加载
             </button>
             <button

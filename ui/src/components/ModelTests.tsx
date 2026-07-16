@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -41,6 +41,12 @@ function resultKey(result: Pick<ModelTestResult, 'providerId' | 'modelName'>) {
   return `${result.providerId}::${result.modelName}`;
 }
 
+function mergeModelTestResults(current: ModelTestResult[], incoming: ModelTestResult[]) {
+  const merged = new Map(current.map(result => [resultKey(result), result]));
+  incoming.forEach(result => merged.set(resultKey(result), result));
+  return Array.from(merged.values()).sort((a, b) => b.startedAt - a.startedAt);
+}
+
 function StatusPill({ status }: { status: ModelTestStatus }) {
   const meta = statusMeta[status];
   return (
@@ -78,6 +84,14 @@ export default function ModelTests() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const [results, setResults] = useState<ModelTestResult[]>([]);
+  const [progress, setProgress] = useState<{ total: number; completed: number; current: ModelTestTarget | null; stopped: boolean }>({
+    total: 0,
+    completed: 0,
+    current: null,
+    stopped: false,
+  });
+  const abortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
 
   const targets = useMemo<ModelTestTarget[]>(() => state.providers.flatMap(provider =>
     provider.models.map(modelName => ({
@@ -103,6 +117,8 @@ export default function ModelTests() {
   const selectedTargets = targets.filter(target => selected.has(target.id));
   const selectedCapabilities = Array.from(capabilities);
   const resultMap = new Map(results.map(result => [resultKey(result), result]));
+  const progressPercent = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+  const currentTargetKey = progress.current ? targetKey(progress.current) : '';
 
   const toggleTarget = (id: string) => {
     setSelected(current => {
@@ -134,20 +150,44 @@ export default function ModelTests() {
 
   const runTests = async () => {
     if (!selectedTargets.length || !selectedCapabilities.length) return;
+    const queue = [...selectedTargets];
+    const capabilitiesToRun = [...selectedCapabilities];
     setRunning(true);
     setError('');
+    stopRequestedRef.current = false;
+    setProgress({ total: queue.length, completed: 0, current: queue[0] || null, stopped: false });
     try {
-      const nextResults = await runModelTests(selectedTargets, selectedCapabilities);
-      setResults(current => {
-        const merged = new Map(current.map(result => [resultKey(result), result]));
-        nextResults.forEach(result => merged.set(resultKey(result), result));
-        return Array.from(merged.values()).sort((a, b) => b.startedAt - a.startedAt);
-      });
+      for (let index = 0; index < queue.length; index += 1) {
+        if (stopRequestedRef.current) break;
+        const target = queue[index];
+        const controller = new AbortController();
+        abortRef.current = controller;
+        setProgress({ total: queue.length, completed: index, current: target, stopped: false });
+
+        const nextResults = await runModelTests([target], capabilitiesToRun, controller.signal);
+        setResults(current => mergeModelTestResults(current, nextResults));
+        setProgress({ total: queue.length, completed: index + 1, current: queue[index + 1] || null, stopped: false });
+      }
     } catch (err) {
+      if (
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'AbortError')
+      ) {
+        setProgress(current => ({ ...current, current: null, stopped: true }));
+        return;
+      }
       setError(err instanceof Error ? err.message : '模型能力测试失败');
     } finally {
+      abortRef.current = null;
       setRunning(false);
     }
+  };
+
+  const stopTests = () => {
+    stopRequestedRef.current = true;
+    abortRef.current?.abort();
+    setProgress(current => ({ ...current, current: null, stopped: true }));
+    setRunning(false);
   };
 
   const summary = useMemo(() => {
@@ -169,6 +209,7 @@ export default function ModelTests() {
           <h2 className="mt-3 text-2xl font-bold text-slate-800">模型能力测试</h2>
           <p className="mt-1 text-slate-500">用极简请求探测文本、图片和工具调用三项能力，只判定是否支持。</p>
         </div>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
         <button
           onClick={runTests}
           disabled={running || !selectedTargets.length || !selectedCapabilities.length}
@@ -177,7 +218,49 @@ export default function ModelTests() {
           {running ? <LoadingSpinner size="sm" /> : <Play size={16} />}
           开始测试 {selectedTargets.length ? `(${selectedTargets.length})` : ''}
         </button>
+          {running && (
+            <button
+              type="button"
+              onClick={stopTests}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 sm:w-auto"
+            >
+              <Square size={15} />
+              终止测试
+            </button>
+          )}
+        </div>
       </div>
+
+      {(running || progress.total > 0) && (
+        <div className="motion-card rounded-xl border border-cyan-200 bg-cyan-50/70 p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-semibold text-cyan-800">
+                {running ? <LoadingSpinner size="sm" /> : progress.stopped ? <Square size={14} /> : <CheckCircle2 size={15} />}
+                <span>{running ? '逐个测试中' : progress.stopped ? '测试已终止' : '测试已完成'}</span>
+                <span className="rounded-full bg-white/70 px-2 py-0.5 font-mono text-xs text-cyan-700">
+                  {progress.completed} / {progress.total}
+                </span>
+              </div>
+              <p className="mt-1 truncate text-xs text-cyan-700/80">
+                {progress.current ? `当前模型：${progress.current.providerName} / ${progress.current.modelName}` : '当前没有正在运行的模型'}
+              </p>
+            </div>
+            <div className="w-full md:w-72">
+              <div className="flex items-center justify-between text-[11px] font-mono text-cyan-700">
+                <span>Progress</span>
+                <span>{progressPercent}%</span>
+              </div>
+              <div className="mt-1 h-2 overflow-hidden rounded-full bg-white/70">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all duration-300"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_1fr]">
         <section className="space-y-4">
@@ -233,12 +316,16 @@ export default function ModelTests() {
             <div className="mt-3 max-h-[460px] space-y-2 overflow-y-auto pr-1">
               {filteredTargets.map((target, index) => {
                 const active = selected.has(target.id);
+                const key = targetKey(target);
+                const isCurrent = currentTargetKey === key;
+                const hasResult = resultMap.has(key);
                 return (
                   <button
                     key={target.id}
                     onClick={() => toggleTarget(target.id)}
                     className={cn(
                       'table-row-motion w-full rounded-lg border p-3 text-left transition-all',
+                      isCurrent ? 'border-cyan-500 bg-cyan-100 shadow-lg shadow-cyan-200/60' :
                       active ? 'border-cyan-300 bg-cyan-50' : 'border-slate-200 bg-white hover:bg-slate-50'
                     )}
                     style={{ animationDelay: `${Math.min(index, 14) * 18}ms` }}
@@ -251,7 +338,11 @@ export default function ModelTests() {
                         <Check size={13} />
                       </span>
                       <div className="min-w-0">
-                        <p className="truncate font-mono text-sm text-slate-800">{target.modelName}</p>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <p className="truncate font-mono text-sm text-slate-800">{target.modelName}</p>
+                          {isCurrent && <span className="shrink-0 rounded-full bg-cyan-600 px-2 py-0.5 text-[10px] font-medium text-white">测试中</span>}
+                          {!isCurrent && hasResult && <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">已测</span>}
+                        </div>
                         <p className="truncate text-xs text-slate-500">{target.providerName}</p>
                         <p className="truncate font-mono text-[11px] text-slate-400">{target.baseUrl}</p>
                       </div>

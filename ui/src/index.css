@@ -71,6 +71,43 @@ button:active {
   50% { opacity: 0.5; }
 }
 
+@keyframes live-glyph-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes live-glyph-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.48;
+    transform: scale(0.82);
+  }
+}
+
+@keyframes live-glyph-ping {
+  0% {
+    opacity: 0.62;
+    transform: scale(0.72);
+  }
+  75%, 100% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
+@keyframes live-glyph-breathe {
+  0%, 100% {
+    filter: drop-shadow(0 0 0 rgba(34, 211, 238, 0));
+  }
+  50% {
+    filter: drop-shadow(0 0 6px currentColor);
+  }
+}
+
 @keyframes page-enter {
   from {
     opacity: 0;
@@ -543,19 +580,29 @@ button:active {
 .uiverse-login-card {
   position: relative;
   overflow: hidden;
+  isolation: isolate;
 }
 
 .uiverse-shell .motion-card::before,
 .uiverse-login-card::before {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: -2px;
   pointer-events: none;
   border-radius: inherit;
   background:
-    linear-gradient(120deg, rgba(34, 211, 238, 0.22), transparent 30%),
-    linear-gradient(300deg, rgba(244, 114, 182, 0.18), transparent 32%);
+    linear-gradient(115deg, rgba(34, 211, 238, 0.18) 0%, rgba(34, 211, 238, 0.08) 38%, rgba(244, 114, 182, 0.15) 100%),
+    linear-gradient(300deg, rgba(244, 114, 182, 0.16) 0%, rgba(167, 139, 250, 0.08) 42%, rgba(34, 211, 238, 0.12) 100%);
   opacity: 0.46;
+  z-index: -1;
+}
+
+.uiverse-shell[data-theme="light"] .motion-card::before,
+.uiverse-login[data-theme="light"] .uiverse-login-card::before {
+  background:
+    linear-gradient(110deg, rgba(224, 242, 254, 0.58) 0%, rgba(240, 253, 250, 0.42) 44%, rgba(253, 242, 248, 0.5) 100%),
+    linear-gradient(300deg, rgba(244, 114, 182, 0.12) 0%, rgba(255, 255, 255, 0.18) 45%, rgba(34, 211, 238, 0.16) 100%);
+  opacity: 0.88;
 }
 
 .uiverse-shell .motion-card:hover,
@@ -804,6 +851,16 @@ button:active {
 .uiverse-shell[data-theme="light"] thead tr {
   background: rgba(236, 254, 255, 0.96) !important;
   color: #164e63 !important;
+}
+
+.uiverse-shell[data-theme="light"] .motion-card > .overflow-x-auto,
+.uiverse-shell[data-theme="light"] .motion-card > :where(table, div:has(> table)) {
+  background:
+    linear-gradient(100deg, rgba(224, 242, 254, 0.58) 0%, rgba(240, 253, 250, 0.42) 48%, rgba(253, 242, 248, 0.46) 100%) !important;
+}
+
+.uiverse-shell[data-theme="light"] tbody tr {
+  background-color: rgba(236, 254, 255, 0.48);
 }
 
 .uiverse-shell tbody tr {
@@ -1056,6 +1113,37 @@ button:active {
 
 .animate-pulse-dot {
   animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.live-animated-icon {
+  transform-origin: center;
+  will-change: filter;
+}
+
+.live-animated-icon.live-glyph-active {
+  animation: live-glyph-breathe 900ms ease-in-out infinite !important;
+}
+
+.live-animated-icon .live-glyph-spin {
+  animation: live-glyph-spin 1050ms linear infinite !important;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.live-animated-icon .live-glyph-pulse {
+  animation: live-glyph-pulse 1400ms ease-in-out infinite !important;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.live-animated-icon .live-glyph-delay {
+  animation-delay: 250ms !important;
+}
+
+.live-animated-icon .live-glyph-ping {
+  animation: live-glyph-ping 1550ms cubic-bezier(0, 0, 0.2, 1) infinite !important;
+  transform-origin: center;
+  will-change: transform, opacity;
 }
 
 @media (max-width: 767px) {
