@@ -644,6 +644,66 @@ button:active {
   box-shadow: 0 12px 32px rgba(34, 211, 238, 0.22), 0 0 18px rgba(244, 114, 182, 0.12);
 }
 
+.uiverse-shell button.queue-icon-button {
+  color: #0f766e !important;
+  background: rgba(255, 255, 255, 0.92) !important;
+  border-color: rgba(14, 116, 144, 0.24) !important;
+}
+
+.uiverse-shell button.queue-icon-button::before {
+  display: none !important;
+}
+
+.uiverse-shell button.queue-icon-button svg {
+  position: relative;
+  z-index: 1;
+  display: block;
+  opacity: 1 !important;
+  stroke: currentColor !important;
+  stroke-width: 2.4;
+}
+
+.uiverse-shell button.queue-icon-button[data-queue-icon] svg {
+  display: none !important;
+}
+
+.uiverse-shell button.queue-icon-button[data-queue-icon]::after {
+  content: attr(data-queue-icon);
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1em;
+  color: currentColor;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 16px;
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 0 10px rgba(34, 211, 238, 0.22);
+}
+
+.uiverse-shell button.queue-icon-button:hover {
+  color: #2563eb !important;
+  background: rgba(219, 234, 254, 0.9) !important;
+}
+
+.uiverse-shell button.queue-icon-button:disabled {
+  color: #94a3b8 !important;
+  background: rgba(248, 250, 252, 0.72) !important;
+}
+
+.uiverse-shell[data-theme="dark"] button.queue-icon-button {
+  color: #67e8f9 !important;
+  background: rgba(15, 23, 42, 0.9) !important;
+  border-color: rgba(34, 211, 238, 0.28) !important;
+}
+
+.uiverse-shell[data-theme="dark"] button.queue-icon-button:disabled {
+  color: #64748b !important;
+  background: rgba(15, 23, 42, 0.56) !important;
+}
+
 .uiverse-shell button.absolute,
 .uiverse-login button.absolute {
   position: absolute !important;
@@ -861,6 +921,18 @@ button:active {
 
 .uiverse-shell[data-theme="light"] tbody tr {
   background-color: rgba(236, 254, 255, 0.48);
+}
+
+.uiverse-shell .log-error-preview {
+  display: -webkit-box !important;
+  max-width: 100%;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
 .uiverse-shell tbody tr {

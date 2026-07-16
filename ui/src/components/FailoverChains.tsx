@@ -469,10 +469,11 @@ function ChainEditor({
                         <div className="flex min-w-0 items-center gap-2">
                           <button
                             type="button"
+                            data-queue-icon="↕"
                             onPointerDown={event => handleDragStart(event, idx)}
                             onPointerUp={resetDragState}
                             onPointerCancel={resetDragState}
-                            className="inline-flex h-7 w-7 touch-none flex-shrink-0 cursor-grab items-center justify-center rounded-md border border-slate-200 bg-white text-slate-400 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 active:cursor-grabbing"
+                            className="queue-icon-button inline-flex h-7 w-7 touch-none flex-shrink-0 cursor-grab items-center justify-center rounded-md border border-slate-200 bg-white text-slate-400 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 active:cursor-grabbing"
                             title="拖动调整顺序"
                             aria-label={`调整 ${model.modelName} 的顺序`}
                           >
@@ -494,9 +495,10 @@ function ChainEditor({
                         <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                           <button
                             type="button"
+                            data-queue-icon="↑"
                             onClick={() => moveModel(idx, -1)}
                             disabled={idx === 0}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                            className="queue-icon-button inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
                             title="上移"
                             aria-label={`上移 ${model.modelName}`}
                           >
@@ -504,9 +506,10 @@ function ChainEditor({
                           </button>
                           <button
                             type="button"
+                            data-queue-icon="↓"
                             onClick={() => moveModel(idx, 1)}
                             disabled={idx === orderedModels.length - 1}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                            className="queue-icon-button inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
                             title="下移"
                             aria-label={`下移 ${model.modelName}`}
                           >

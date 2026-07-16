@@ -87,15 +87,15 @@ export default function Logs() {
       {/* Log Table */}
       <div className="motion-card bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1180px] table-fixed text-sm">
+          <table className="w-full min-w-[1160px] table-fixed text-sm">
             <colgroup>
+              <col className="w-[135px]" />
+              <col className="w-[130px]" />
               <col className="w-[150px]" />
-              <col className="w-[150px]" />
-              <col className="w-[180px]" />
-              <col />
-              <col className="w-[110px]" />
+              <col className="w-[330px]" />
               <col className="w-[90px]" />
-              <col className="w-[180px]" />
+              <col className="w-[75px]" />
+              <col className="w-[250px]" />
             </colgroup>
             <thead>
               <tr className="bg-slate-50 text-slate-500 text-xs">
@@ -134,19 +134,19 @@ export default function Logs() {
                       </span>
                     </td>
                     <td className="px-5 py-3">
-                      <div className="flex min-w-0 items-center gap-1 overflow-hidden">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                         {log.failedModels.map((m, i) => (
                           <span
                             key={i}
-                            className="inline-flex max-w-[150px] shrink-0 rounded bg-red-50 px-1.5 py-0.5 font-mono text-[11px] text-red-500 line-through"
+                            className="inline-flex max-w-full rounded bg-red-50 px-1.5 py-0.5 font-mono text-[11px] leading-5 text-red-500 line-through"
                             title={m}
                           >
-                            <span className="block truncate whitespace-nowrap">{m}</span>
+                            <span className="break-all">{m}</span>
                           </span>
                         ))}
                         {hasFailover && <ArrowRight size={10} className="shrink-0 text-slate-300" />}
                         <span className={cn(
-                          'inline-flex min-w-0 max-w-[220px] truncate whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[11px]',
+                          'inline-flex max-w-full break-all rounded px-1.5 py-0.5 font-mono text-[11px] leading-5',
                           log.status === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
                         )}>
                           {log.finalModel || '全部失败'}
@@ -173,7 +173,7 @@ export default function Logs() {
                         {log.latency >= 1000 ? (log.latency / 1000).toFixed(1) + 's' : log.latency + 'ms'}
                       </span>
                     </td>
-                    <td className="px-5 py-3 text-xs text-slate-500 max-w-[220px]">
+                    <td className="px-5 py-3 text-xs text-slate-500">
                       {log.error ? (
                         <button
                           type="button"
@@ -181,7 +181,7 @@ export default function Logs() {
                             title: `${log.chainName} / ${log.originalModel}`,
                             message: log.error || '',
                           })}
-                          className="block max-w-[220px] truncate text-left text-blue-600 hover:text-blue-700 hover:underline"
+                          className="log-error-preview block w-full min-w-0 text-left text-blue-600 hover:text-blue-700 hover:underline"
                           title="查看完整错误"
                         >
                           {log.error}
