@@ -45,6 +45,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build UI
+        shell: bash
+        run: |
+          npm ci
+          npm --prefix ui ci
+          npm run build:ui
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

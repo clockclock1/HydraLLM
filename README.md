@@ -75,6 +75,18 @@ STREAM_FAILURE_PROBE_KB=64
 RUST_LOG=hydrallm=info,tower_http=info
 ```
 
+## 构建前端
+
+仓库中的 `ui/` 是前端源码，`assets/` 是 Rust 服务启动时嵌入的静态资源产物。修改前端后执行：
+
+```bash
+npm ci
+npm --prefix ui ci
+npm run build:ui
+```
+
+`npm run build:ui` 会构建 React UI，并把产物复制到 `assets/index.html`、`assets/app.css`、`assets/app.js` 和 `assets/app-core.js`。
+
 ## 发布构建
 
 ```bash
@@ -318,6 +330,18 @@ BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
 RUST_LOG=hydrallm=info,tower_http=info
 ```
+
+## Build UI
+
+The `ui/` directory contains the frontend source. The `assets/` directory contains static assets embedded by the Rust service. After changing the frontend, run:
+
+```bash
+npm ci
+npm --prefix ui ci
+npm run build:ui
+```
+
+`npm run build:ui` builds the React UI and copies the output to `assets/index.html`, `assets/app.css`, `assets/app.js`, and `assets/app-core.js`.
 
 ## Release Build
 

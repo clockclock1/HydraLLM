@@ -1,5 +1,8 @@
 /target/
 /output/
+/node_modules/
+/ui/node_modules/
+/ui/dist/
 /data/config.json
 /data/stats.json
 /deploy/compose/.env
