@@ -167,7 +167,16 @@ pub async fn providers_health(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_else(|| configured_providers(&cfg));
-    let results = state.provider_health.cached_for(providers).await;
+    let refresh = body
+        .get("refresh")
+        .or_else(|| body.get("force"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let results = if refresh {
+        state.provider_health.refresh_for(providers).await
+    } else {
+        state.provider_health.cached_for(providers).await
+    };
     Json(json!({ "ok": true, "providers": results })).into_response()
 }
 

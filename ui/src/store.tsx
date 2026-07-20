@@ -610,7 +610,7 @@ const StoreContext = createContext<{
   loadConfig: (sessionOverride?: string) => Promise<void>;
   saveConfig: () => Promise<void>;
   fetchProviderModels: (url: string, apiKey: string) => Promise<string[]>;
-  refreshProviderHealth: () => Promise<void>;
+  refreshProviderHealth: (providerId?: string, refresh?: boolean) => Promise<void>;
   runModelTests: (targets: ModelTestTarget[], capabilities: ModelCapability[], signal?: AbortSignal) => Promise<ModelTestResult[]>;
 } | null>(null);
 
@@ -732,15 +732,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [providerHealthSignature]
   );
 
-  const refreshProviderHealth = useCallback(async () => {
+  const refreshProviderHealth = useCallback(async (providerId?: string, refresh = false) => {
     if (!state.configLoaded || !providerHealthRequest.length) return;
+    const providers = providerId
+      ? providerHealthRequest.filter(provider => provider.id === providerId)
+      : providerHealthRequest;
+    if (!providers.length) return;
     const res = await fetch('/api/providers/health', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...adminHeaders(),
       },
-      body: JSON.stringify({ providers: providerHealthRequest }),
+      body: JSON.stringify({ providers, refresh }),
     });
     handleUnauthorized(res);
     if (!res.ok) throw new Error(await readJsonError(res));

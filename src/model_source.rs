@@ -158,7 +158,7 @@ impl ProviderHealthService {
     }
 
     pub async fn refresh_configured(&self, cfg: &Config) {
-        self.refresh(configured_providers(cfg)).await;
+        self.refresh(configured_providers(cfg), true).await;
     }
 
     pub async fn cached_for(&self, providers: Vec<Value>) -> Vec<Value> {
@@ -169,9 +169,16 @@ impl ProviderHealthService {
             .collect()
     }
 
-    async fn refresh(&self, providers: Vec<Value>) {
+    pub async fn refresh_for(&self, providers: Vec<Value>) -> Vec<Value> {
+        self.refresh(providers.clone(), false).await;
+        self.cached_for(providers).await
+    }
+
+    async fn refresh(&self, providers: Vec<Value>, replace_all: bool) {
         if providers.is_empty() {
-            self.cache.write().await.clear();
+            if replace_all {
+                self.cache.write().await.clear();
+            }
             return;
         }
         let futures = providers
@@ -182,7 +189,12 @@ impl ProviderHealthService {
         for (provider, result) in providers.into_iter().zip(results.into_iter()) {
             next.insert(provider_health_key(&provider), result);
         }
-        *self.cache.write().await = next;
+        let mut cache = self.cache.write().await;
+        if replace_all {
+            *cache = next;
+        } else {
+            cache.extend(next);
+        }
     }
 }
 
