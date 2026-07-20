@@ -384,7 +384,12 @@ pub fn trim_slashes(input: &str) -> String {
 
 pub fn endpoint_suffix(path: &str) -> String {
     let cleaned = path.trim_start_matches('/');
-    cleaned.strip_prefix("v1/").unwrap_or(cleaned).to_string()
+    let suffix = cleaned.strip_prefix("v1/").unwrap_or(cleaned);
+    if suffix == "response" {
+        "responses".to_string()
+    } else {
+        suffix.to_string()
+    }
 }
 
 pub fn upstream_url(target: &TargetConfig, path: &str) -> String {
@@ -438,4 +443,17 @@ pub fn provider_name_from_url(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|url| url.host_str().map(|host| host.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_suffix;
+
+    #[test]
+    fn response_alias_uses_openai_responses_endpoint() {
+        assert_eq!(endpoint_suffix("/v1/response"), "responses");
+        assert_eq!(endpoint_suffix("/response"), "responses");
+        assert_eq!(endpoint_suffix("/v1/responses"), "responses");
+        assert_eq!(endpoint_suffix("/responses"), "responses");
+    }
 }

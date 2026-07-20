@@ -164,6 +164,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/chat/completions", post(proxy::proxy_endpoint))
         .route("/v1/responses", post(proxy::proxy_endpoint))
         .route("/responses", post(proxy::proxy_endpoint))
+        .route("/v1/response", post(proxy::proxy_endpoint))
+        .route("/response", post(proxy::proxy_endpoint))
         .route("/v1/completions", post(proxy::proxy_endpoint))
         .route("/completions", post(proxy::proxy_endpoint))
         .fallback(get(admin::static_ui))

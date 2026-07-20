@@ -7,7 +7,7 @@ HydraLLM 是一个 OpenAI 兼容的大模型故障转移代理，内置可视化
 - OpenAI 兼容接口：
   - `GET /v1/models` 和 `GET /models`
   - `POST /v1/chat/completions` 和 `POST /chat/completions`
-  - `POST /v1/responses` 和 `POST /responses`
+  - `POST /v1/responses`、`POST /responses`、`POST /v1/response` 和 `POST /response`
   - `POST /v1/completions` 和 `POST /completions`
 - 自定义代理 API Key，客户端通过 `Authorization: Bearer ...` 调用。
 - Admin Token 登录与 Session 管理，支持 `/api/login`、`/api/logout`、`/api/session`。
@@ -263,7 +263,7 @@ HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI.
 - OpenAI-compatible endpoints:
   - `GET /v1/models` and `GET /models`
   - `POST /v1/chat/completions` and `POST /chat/completions`
-  - `POST /v1/responses` and `POST /responses`
+  - `POST /v1/responses`, `POST /responses`, `POST /v1/response`, and `POST /response`
   - `POST /v1/completions` and `POST /completions`
 - Custom proxy API keys via `Authorization: Bearer ...`.
 - Admin token login and session management with `/api/login`, `/api/logout`, and `/api/session`.
