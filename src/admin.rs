@@ -11,6 +11,7 @@ use axum::{
     Json,
 };
 use bytes::Bytes;
+use serde::Serialize;
 use serde_json::{json, Value};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
@@ -27,17 +28,17 @@ pub async fn login(
     }
     let session = state.auth.create_admin_session();
     let _ = headers;
-    Json(json!({ "ok": true, "session": session })).into_response()
+    admin_json(json!({ "ok": true, "session": session }))
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     state.auth.delete_admin_session(&headers);
-    Json(json!({ "ok": true })).into_response()
+    admin_json(json!({ "ok": true }))
 }
 
 pub async fn session(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cfg = state.config.read().await.clone();
-    Json(json!({ "ok": state.auth.is_admin(&headers, &cfg) })).into_response()
+    admin_json(json!({ "ok": state.auth.is_admin(&headers, &cfg) }))
 }
 
 pub async fn get_config(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -45,7 +46,7 @@ pub async fn get_config(State(state): State<AppState>, headers: HeaderMap) -> Re
     if !state.auth.is_admin(&headers, &cfg) {
         return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
     }
-    Json(cfg).into_response()
+    admin_json(cfg)
 }
 
 pub async fn post_config(
@@ -63,7 +64,7 @@ pub async fn post_config(
             let mut runtime_models = normalized.models.clone();
             runtime_models.extend(state.model_source.cached_models().await);
             cleanup_runtime_state(&state, &runtime_models).await;
-            Json(json!({ "ok": true, "config": normalized })).into_response()
+            admin_json(json!({ "ok": true, "config": normalized }))
         }
         Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
     }
@@ -78,7 +79,7 @@ pub async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Res
         serde_json::to_value(state.stats.snapshot().await).unwrap_or_else(|_| json!({}));
     value["activeThreads"] = json!(state.proxy_runtime.snapshot_threads());
     value["memory"] = process_memory();
-    Json(value).into_response()
+    admin_json(value)
 }
 
 pub async fn get_page_stats(
@@ -136,13 +137,13 @@ pub async fn get_page_stats(
         }
         _ => json!({}),
     };
-    Json(value).into_response()
+    admin_json(value)
 }
 
 pub async fn health(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     let models = state.model_source.runtime_models(&cfg).await;
-    Json(json!({
+    admin_json(json!({
         "ok": true,
         "startedAt": state.stats.snapshot().await.started_at,
         "configPath": state.config_path.to_string_lossy(),
@@ -150,7 +151,6 @@ pub async fn health(State(state): State<AppState>) -> Response {
         "models": models.into_iter().map(|m| m.public_name).collect::<Vec<_>>(),
         "modelSourceError": state.model_source.error().await
     }))
-    .into_response()
 }
 
 pub async fn providers_health(
@@ -177,7 +177,7 @@ pub async fn providers_health(
     } else {
         state.provider_health.cached_for(providers).await
     };
-    Json(json!({ "ok": true, "providers": results })).into_response()
+    admin_json(json!({ "ok": true, "providers": results }))
 }
 
 pub async fn model_source_preview(
@@ -200,12 +200,11 @@ pub async fn model_source_preview(
     match fetch_model_source(&state.client, &source).await {
         Ok(models) => {
             let filtered = filter_source_models(models, &source);
-            Json(json!({
+            admin_json(json!({
                 "ok": true,
                 "count": filtered.len(),
                 "models": filtered.into_iter().take(200).map(|m| m.id).collect::<Vec<_>>()
             }))
-            .into_response()
         }
         Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
     }
@@ -221,12 +220,11 @@ pub async fn model_source_refresh(State(state): State<AppState>, headers: Header
             let mut runtime_models = cfg.models.clone();
             runtime_models.extend(models.clone());
             cleanup_runtime_state(&state, &runtime_models).await;
-            Json(json!({
+            admin_json(json!({
                 "ok": true,
                 "count": models.len(),
                 "models": models.into_iter().take(200).map(|m| m.public_name).collect::<Vec<_>>()
             }))
-            .into_response()
         }
         Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
     }
@@ -271,11 +269,15 @@ pub async fn model_tests_run(
     for target in targets {
         results.push(test_model(&state.client, &target, &capabilities).await);
     }
-    Json(json!({ "ok": true, "results": results })).into_response()
+    admin_json(json!({ "ok": true, "results": results }))
 }
 
 pub async fn static_ui() -> Response {
     embedded_response("index.html")
+}
+
+fn admin_json<T: Serialize>(value: T) -> Response {
+    no_store(Json(value).into_response())
 }
 
 pub async fn app_css() -> Response {
@@ -318,6 +320,20 @@ fn named_asset(name: &str, body: &'static [u8], content_type: &'static str) -> R
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
+        .headers_mut()
+        .insert(header::EXPIRES, HeaderValue::from_static("0"));
     response
 }
 
@@ -582,5 +598,5 @@ fn send_error(status: StatusCode, message: &str, details: Option<Value>) -> Resp
         }
         None => json!({ "error": { "message": message, "type": "proxy_error" } }),
     };
-    (status, Json(body)).into_response()
+    no_store((status, Json(body)).into_response())
 }
