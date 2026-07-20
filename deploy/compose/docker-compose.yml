@@ -7,6 +7,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       DATA_DIR: /app/data
+      RUST_LOG: ${RUST_LOG:-hydrallm=info,tower_http=info}
     ports:
       - "${HYDRALLM_PORT:-8787}:8787"
     volumes:
@@ -16,9 +17,9 @@ services:
     healthcheck:
       test:
         - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - curl
+        - -fsS
+        - http://127.0.0.1:8787/api/health
       interval: 30s
       timeout: 5s
       retries: 3

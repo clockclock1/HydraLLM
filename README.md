@@ -1,56 +1,100 @@
-# HydraLLM
+# HydraLLM 中文 | [English](#english)
 
-中文 | [English](#english)
-
-HydraLLM 是一个 OpenAI 兼容的 LLM 故障转移代理，内置可视化管理界面。它可以暴露自定义 API Key 和 OpenAI 风格接口，并把一个或多个公开模型名按顺序路由到多个上游模型。
+HydraLLM 是一个 OpenAI 兼容的大模型故障转移代理，内置可视化管理界面。它可以暴露自定义 API Key 和 OpenAI 风格接口，并把一个或多个公开模型名按策略路由到多个上游模型，适合低延迟代理、故障转移和容器化部署场景。
 
 ## 功能
 
 - OpenAI 兼容接口：
-  - `GET /v1/models`
-  - `POST /v1/chat/completions`
-  - `POST /v1/responses`
-  - `POST /v1/completions`
-- 同时支持去掉 `/v1` 的路径。
-- 可视化 React 管理界面。
-- 自定义代理 API Key。
-- 固定模型别名。
-- 模型源模式：从自定义 `/v1/models` URL 拉取多个模型，并为所有拉取到的模型套用同一组故障转移上游。
-- 流式、工具调用、response format、多模态请求体原样透传。
-- 本地持久化配置：`data/config.json`。
-- 管理界面每 30 秒自动检查上游 `/models` 状态，只更新在线状态和延迟，不会自动导入模型；真实请求过程会被动识别上游故障并触发转移。
-- 单个上游连续失败达到阈值后会临时禁用，失败次数和冷却分钟数可在管理界面配置。
-- GitHub Release 发布时自动构建 Windows、Linux、macOS 的 amd64 和 arm64 可执行文件。
-- GitHub Release 发布时自动构建并推送多架构 Docker 镜像到 GitHub Packages / GHCR。
+  - `GET /v1/models` 和 `GET /models`
+  - `POST /v1/chat/completions` 和 `POST /chat/completions`
+  - `POST /v1/responses` 和 `POST /responses`
+  - `POST /v1/completions` 和 `POST /completions`
+- 自定义代理 API Key，客户端通过 `Authorization: Bearer ...` 调用。
+- Admin Token 登录与 Session 管理，支持 `/api/login`、`/api/logout`、`/api/session`。
+- 多模型故障转移链，每个公开模型可配置有序 targets。
+- 支持上游字段：`name`、`baseUrl`、`apiKey`、`modelName`、`enabled`、`priority`、`weight`、`maxRetries`、`timeoutMs` 等。
+- 故障转移策略：`priority`、`round-robin`、`weighted`、`latency-based`。
+- 模型源模式：从自定义 `/v1/models` URL 拉取模型，支持 include/exclude 过滤、publicPrefix/publicSuffix 和 `{model}` 模板。
+- 流式 SSE/chunked 原样转发，早期分块会探测上游错误；一旦开始向客户端输出字节，中途错误只记录，不再切换上游。
+- 熔断器：连续失败阈值、冷却时间、立即冷却状态码，例如 `429`。
+- 被动故障检测：真实代理请求触发转移和熔断，管理界面健康检查只更新在线状态与延迟。
+- 代理请求不再限制每个模型的并发线程数；请求或流结束后实时线程记录立即释放。
+- 统计与日志：总请求、成功、失败、转移次数，按模型和 target 的细粒度统计，请求日志，实时线程，进程内存占用。
+- 配置持久化：`data/config.json` 和 `data/stats.json` 使用 tmp + rename 原子写入。
+- 管理界面以内嵌多文件前端形式随服务二进制发布，无需额外前端运行时。
+- CORS、请求超时、body limit、优雅关闭和结构化日志。
 
 ## 本地启动
+
+Windows 一键启动：
 
 ```powershell
 .\start.ps1
 ```
 
-默认信息：
+也可以双击：
 
-- 管理界面：`http://127.0.0.1:8787`
-- 外部监听：`0.0.0.0:8787`
-- 默认 Admin Token：`admin`
-- 默认代理 Key：`sk-local-test`
-
-首次运行会自动创建 `data/config.json`。安全示例配置在 `data/config.example.json`。
-
-## 构建前端
-
-```bash
-npm install
-npm --prefix ui ci
-npm run build:ui
+```text
+start.bat
 ```
 
-`npm run build:ui` 会构建 React UI，并把单文件产物复制到 `public/index.html`。
+Linux/macOS：
+
+```bash
+chmod +x ./start.sh
+./start.sh
+```
+
+直接使用 Cargo：
+
+```bash
+cargo run
+```
+
+默认配置：
+
+- 管理后台：`http://127.0.0.1:8787`
+- 监听地址：`0.0.0.0:8787`
+- Admin Token：`admin`
+- 代理 Key：`sk-local-test`
+- 配置文件：`data/config.json`
+- 统计文件：`data/stats.json`
+
+首次运行时，如果 `data/config.json` 不存在，程序会自动创建默认配置。
+
+常用环境变量：
+
+```bash
+HOST=0.0.0.0
+PORT=8787
+DATA_DIR=./data
+CONFIG_PATH=./data/config.json
+STATS_PATH=./data/stats.json
+BODY_LIMIT_MB=50
+STREAM_FAILURE_PROBE_KB=64
+RUST_LOG=hydrallm=info,tower_http=info
+```
 
 ## 发布构建
 
-创建并发布 GitHub Release 会触发 GitHub Actions。工作流会构建以下可执行文件，并上传到同一个 Release 的附件下：
+```bash
+cargo build --release
+```
+
+启用可选分配器：
+
+```bash
+cargo build --release --features mimalloc
+```
+
+Release profile 已启用 `opt-level=3`、LTO、单 codegen unit、符号裁剪和 `panic=abort`。构建完成后可直接分发：
+
+```text
+target/release/hydrallm
+target/release/hydrallm.exe
+```
+
+GitHub Actions 的 `Build Executables` 工作流会生成以下二进制产物：
 
 - `hydrallm-windows-amd64.exe`
 - `hydrallm-windows-arm64.exe`
@@ -59,43 +103,23 @@ npm run build:ui
 - `hydrallm-macos-amd64`
 - `hydrallm-macos-arm64`
 
-发布新版本：
+发布 Release 时，`Docker Image` 工作流还会构建并推送多架构 Docker 镜像到 GHCR。
 
-1. 把源码推送到 `main`。
-2. 在 GitHub 创建并发布 Release，例如 `v0.1.0`。
-3. 等待 `Build Executables` 工作流完成。
-4. 在 Release 附件中下载对应系统和架构的可执行文件。
+## Docker 发布
 
-## Docker
-
-发布 GitHub Release 也会构建并推送多架构 Docker 镜像到：
-
-```text
-ghcr.io/clockclock1/hydrallm
-```
-
-支持的平台：
-
-- `linux/amd64`
-- `linux/arm64`
-
-拉取镜像：
+本地构建镜像：
 
 ```bash
-docker pull ghcr.io/clockclock1/hydrallm:latest
+docker build -t hydrallm .
 ```
 
 运行：
 
 ```bash
-docker run --rm -p 8787:8787 -v hydrallm-data:/app/data ghcr.io/clockclock1/hydrallm:latest
+docker run --rm -p 8787:8787 -v hydrallm-data:/app/data hydrallm
 ```
 
-## 编排部署
-
-部署文件位于 `deploy/`，只使用 GHCR 中已经编译好的 Docker 镜像，不会本地构建镜像。
-
-Docker Compose：
+使用 Compose：
 
 ```bash
 cd deploy/compose
@@ -105,106 +129,216 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Compose 默认映射为 `8787:8787`。如果在 `.env` 中设置 `HYDRALLM_PORT=18080`，访问地址就是 `http://127.0.0.1:18080`，容器内部端口仍然是 `8787`。
-
-Compose 默认把数据保存到 clone 下来的项目目录 `deploy/compose/data`，并自动创建 `hydrallm-network` 网络。可以在 `.env` 中通过 `HYDRALLM_DATA_DIR` 和 `HYDRALLM_NETWORK` 修改。
-
-Kubernetes：
+可通过环境变量覆盖：
 
 ```bash
-cd deploy/kubernetes
-kustomize edit set image ghcr.io/clockclock1/hydrallm=ghcr.io/clockclock1/hydrallm:v0.1.0
-kubectl apply -k .
+HYDRALLM_IMAGE=ghcr.io/clockclock1/hydrallm
+HYDRALLM_PORT=8787
+HYDRALLM_DATA_DIR=./data
+HYDRALLM_VERSION=latest
+HYDRALLM_NETWORK=hydrallm-network
+RUST_LOG=hydrallm=info,tower_http=info
 ```
 
-更多细节见 `deploy/README.md`。
+## 编排部署
+
+Kubernetes 配置位于 `deploy/kubernetes/`：
+
+```bash
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl apply -f deploy/kubernetes/pvc.yaml
+kubectl apply -f deploy/kubernetes/deployment.yaml
+kubectl apply -f deploy/kubernetes/service.yaml
+```
+
+默认镜像：
+
+```text
+ghcr.io/clockclock1/hydrallm:latest
+```
+
+默认端口：
+
+```text
+8787
+```
 
 ## 配置模型
 
-每个公开模型会映射到一组有序上游：
+配置文件示例位于 `data/config.example.json`。最小模型配置如下：
 
 ```json
 {
-  "publicName": "gpt-failover",
-  "enabled": true,
-  "targets": [
+  "adminToken": "admin",
+  "proxyKeys": [
     {
-      "name": "primary",
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "sk-...",
-      "modelName": "gpt-4.1-mini",
+      "name": "test-key",
+      "key": "sk-local-test",
       "enabled": true
-    },
+    }
+  ],
+  "models": [
     {
-      "name": "backup",
-      "baseUrl": "https://backup.example.com/v1",
-      "apiKey": "sk-...",
-      "modelName": "gpt-4o-mini",
-      "enabled": true
+      "publicName": "gpt-failover",
+      "enabled": true,
+      "targets": [
+        {
+          "name": "primary-openai",
+          "baseUrl": "https://api.openai.com/v1",
+          "apiKey": "sk-replace-me",
+          "modelName": "gpt-4.1-mini",
+          "enabled": true
+        }
+      ]
     }
   ]
 }
 ```
 
-模型源模式会从自定义 URL 拉取模型 ID，并为每个拉取到的模型创建运行时路由。上游模型模板支持 `{model}`。
+请求示例：
 
-默认熔断策略是单个上游连续失败 3 次后禁用 10 分钟；这两个值可在管理界面侧边栏修改并保存到 `data/config.json` 的 `circuitBreaker.failureThreshold` 和 `circuitBreaker.cooldownMinutes`。`429` 会立即进入冷却，避免同一个限流上游被反复命中。真实代理请求会识别所有 4xx/5xx 上游状态，也会识别 HTTP 200 但响应体内包含 OpenAI 风格 `error` 或 `returned 429` 的伪成功错误。如果某条转移链的所有上游都处于熔断状态，代理会自动解除该链的熔断并重新尝试整条链。
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-failover",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": false
+  }'
+```
 
-故障转移发生在向客户端返回响应之前。流式响应一旦开始输出，代理无法在中途切换上游，因为字节已经发送给客户端。
+流式请求：
+
+```bash
+curl -N http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-failover",
+    "messages": [{"role": "user", "content": "Say hello slowly"}],
+    "stream": true
+  }'
+```
+
+## 性能测试建议
+
+建议先使用本地 OpenAI 兼容 mock 上游，再用相同配置进行压测：
+
+```bash
+oha -z 60s -c 128 -m POST http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-test" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-failover","messages":[{"role":"user","content":"ping"}],"stream":false}'
+```
+
+建议观察：
+
+- QPS 和 p50/p95/p99 延迟：`oha`、`wrk`、`bombardier`。
+- 内存：Windows 任务管理器、`Get-Process hydrallm`、Linux `pidstat -r`。
+- 连接复用：上游访问日志，短时间调试可打开 `RUST_LOG=reqwest=debug`。
+- 故障转移：让主上游返回 429、500 或超时，检查 `/api/stats` 和 `x-proxy-target`。
+- 流式转发：使用 `curl -N` 或流式压测工具，同时观察 CPU 和实时状态。
 
 ---
 
 ## English
 
-HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI. It exposes custom API keys and OpenAI-style endpoints while routing one or many public model names through ordered upstream failover targets.
+HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI. It exposes custom API keys and OpenAI-style endpoints while routing one or many public model names through configurable upstream failover targets, making it suitable for low-latency proxying, failover, and containerized deployments.
 
 ## Features
 
 - OpenAI-compatible endpoints:
-  - `GET /v1/models`
-  - `POST /v1/chat/completions`
-  - `POST /v1/responses`
-  - `POST /v1/completions`
-- The same endpoints also work without the `/v1` prefix.
-- Visual React management UI.
-- Custom proxy API keys.
-- Fixed public model aliases.
-- Model-source mode: pull many model names from a custom `/v1/models` URL and apply one failover target group to all fetched models.
-- Streaming, tool calls, response formats, and multimodal request bodies are passed through unchanged.
-- Persistent local config in `data/config.json`.
-- The management UI checks upstream `/models` status every 30 seconds. It only updates online status and latency, and does not import models automatically; real proxy requests passively detect upstream failures and trigger failover.
-- Per-upstream circuit breaking temporarily disables repeatedly failing targets; the failure threshold and cooldown minutes are configurable in the UI.
-- GitHub Release builds standalone executables for Windows, Linux, and macOS on amd64 and arm64.
-- GitHub Release builds and pushes a multi-arch Docker image to GitHub Packages / GHCR.
+  - `GET /v1/models` and `GET /models`
+  - `POST /v1/chat/completions` and `POST /chat/completions`
+  - `POST /v1/responses` and `POST /responses`
+  - `POST /v1/completions` and `POST /completions`
+- Custom proxy API keys via `Authorization: Bearer ...`.
+- Admin token login and session management with `/api/login`, `/api/logout`, and `/api/session`.
+- Multiple model failover chains. Each public model can define ordered upstream targets.
+- Target fields include `name`, `baseUrl`, `apiKey`, `modelName`, `enabled`, `priority`, `weight`, `maxRetries`, `timeoutMs`, and more.
+- Failover strategies: `priority`, `round-robin`, `weighted`, `latency-based`.
+- Model-source mode: fetch models from a custom `/v1/models` URL, apply include/exclude filters, add public prefixes/suffixes, and expand `{model}` templates.
+- Streaming SSE/chunked pass-through with early upstream error probing. After bytes are written to the client, mid-stream errors are recorded but not failed over.
+- Circuit breaker with failure threshold, cooldown duration, and immediate cooldown status codes such as `429`.
+- Passive failure detection: real proxy requests trigger failover and circuit breaking; UI health checks only update observed provider status and latency.
+- Proxy requests are no longer capped by per-model thread slots. Active thread records are released immediately when the request or stream finishes.
+- Stats and logs: total requests, successes, failures, failovers, per-model and per-target stats, request logs, live threads, and process memory.
+- Config persistence: `data/config.json` and `data/stats.json` are saved atomically with tmp + rename.
+- Embedded multi-file admin UI served from the service binary. No extra frontend runtime is required.
+- CORS, request timeout, body limit, graceful shutdown, and structured logging.
 
 ## Local Start
+
+Windows one-click start:
 
 ```powershell
 .\start.ps1
 ```
 
+Or double-click:
+
+```text
+start.bat
+```
+
+Linux/macOS:
+
+```bash
+chmod +x ./start.sh
+./start.sh
+```
+
+Direct Cargo start:
+
+```bash
+cargo run
+```
+
 Defaults:
 
 - Admin UI: `http://127.0.0.1:8787`
-- External bind: `0.0.0.0:8787`
-- Default admin token: `admin`
-- Default proxy key: `sk-local-test`
+- Bind address: `0.0.0.0:8787`
+- Admin Token: `admin`
+- Proxy Key: `sk-local-test`
+- Config: `data/config.json`
+- Stats: `data/stats.json`
 
-The first run creates `data/config.json` automatically. A safe template is included at `data/config.example.json`.
+On first run, the server creates `data/config.json` automatically if it does not exist.
 
-## Build UI
+Common environment variables:
 
 ```bash
-npm install
-npm --prefix ui ci
-npm run build:ui
+HOST=0.0.0.0
+PORT=8787
+DATA_DIR=./data
+CONFIG_PATH=./data/config.json
+STATS_PATH=./data/stats.json
+BODY_LIMIT_MB=50
+STREAM_FAILURE_PROBE_KB=64
+RUST_LOG=hydrallm=info,tower_http=info
 ```
 
-`npm run build:ui` builds the React UI and copies the single-file output to `public/index.html`.
+## Release Build
 
-## Release Builds
+```bash
+cargo build --release
+```
 
-Publishing a GitHub Release triggers GitHub Actions. The workflow builds these executables and uploads them to the same Release:
+Optional allocator:
+
+```bash
+cargo build --release --features mimalloc
+```
+
+The release profile enables `opt-level=3`, LTO, single codegen unit, symbol stripping, and `panic=abort`. After building, distribute the binary directly:
+
+```text
+target/release/hydrallm
+target/release/hydrallm.exe
+```
+
+The GitHub Actions `Build Executables` workflow builds these artifacts:
 
 - `hydrallm-windows-amd64.exe`
 - `hydrallm-windows-arm64.exe`
@@ -213,43 +347,23 @@ Publishing a GitHub Release triggers GitHub Actions. The workflow builds these e
 - `hydrallm-macos-amd64`
 - `hydrallm-macos-arm64`
 
-To publish a new version:
+Publishing a Release also runs the `Docker Image` workflow, which builds and pushes a multi-arch Docker image to GHCR.
 
-1. Push source changes to `main`.
-2. Create and publish a GitHub Release such as `v0.1.0`.
-3. Wait for the `Build Executables` workflow.
-4. Download the binaries from the Release assets.
+## Docker Release
 
-## Docker
-
-Publishing a GitHub Release also builds and pushes a multi-arch Docker image to:
-
-```text
-ghcr.io/clockclock1/hydrallm
-```
-
-Supported platforms:
-
-- `linux/amd64`
-- `linux/arm64`
-
-Pull:
+Build locally:
 
 ```bash
-docker pull ghcr.io/clockclock1/hydrallm:latest
+docker build -t hydrallm .
 ```
 
 Run:
 
 ```bash
-docker run --rm -p 8787:8787 -v hydrallm-data:/app/data ghcr.io/clockclock1/hydrallm:latest
+docker run --rm -p 8787:8787 -v hydrallm-data:/app/data hydrallm
 ```
 
-## Orchestrated Deployment
-
-Deployment manifests are in `deploy/`. They use the prebuilt Docker image from GHCR and do not build images locally.
-
-Docker Compose:
+Use Compose:
 
 ```bash
 cd deploy/compose
@@ -259,49 +373,113 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Compose maps `8787:8787` by default. If `.env` sets `HYDRALLM_PORT=18080`, open `http://127.0.0.1:18080`; the container port remains `8787`.
-
-Compose stores data in the cloned project folder at `deploy/compose/data` by default and automatically creates the `hydrallm-network` network. You can customize them with `HYDRALLM_DATA_DIR` and `HYDRALLM_NETWORK` in `.env`.
-
-Kubernetes:
+Override with environment variables:
 
 ```bash
-cd deploy/kubernetes
-kustomize edit set image ghcr.io/clockclock1/hydrallm=ghcr.io/clockclock1/hydrallm:v0.1.0
-kubectl apply -k .
+HYDRALLM_IMAGE=ghcr.io/clockclock1/hydrallm
+HYDRALLM_PORT=8787
+HYDRALLM_DATA_DIR=./data
+HYDRALLM_VERSION=latest
+HYDRALLM_NETWORK=hydrallm-network
+RUST_LOG=hydrallm=info,tower_http=info
 ```
 
-See `deploy/README.md` for details.
+## Orchestration Deployment
 
-## Configuration Model
+Kubernetes manifests live under `deploy/kubernetes/`:
 
-Each public model maps to ordered targets:
+```bash
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl apply -f deploy/kubernetes/pvc.yaml
+kubectl apply -f deploy/kubernetes/deployment.yaml
+kubectl apply -f deploy/kubernetes/service.yaml
+```
+
+Default image:
+
+```text
+ghcr.io/clockclock1/hydrallm:latest
+```
+
+Default port:
+
+```text
+8787
+```
+
+## Model Configuration
+
+The example config lives at `data/config.example.json`. Minimal model configuration:
 
 ```json
 {
-  "publicName": "gpt-failover",
-  "enabled": true,
-  "targets": [
+  "adminToken": "admin",
+  "proxyKeys": [
     {
-      "name": "primary",
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "sk-...",
-      "modelName": "gpt-4.1-mini",
+      "name": "test-key",
+      "key": "sk-local-test",
       "enabled": true
-    },
+    }
+  ],
+  "models": [
     {
-      "name": "backup",
-      "baseUrl": "https://backup.example.com/v1",
-      "apiKey": "sk-...",
-      "modelName": "gpt-4o-mini",
-      "enabled": true
+      "publicName": "gpt-failover",
+      "enabled": true,
+      "targets": [
+        {
+          "name": "primary-openai",
+          "baseUrl": "https://api.openai.com/v1",
+          "apiKey": "sk-replace-me",
+          "modelName": "gpt-4.1-mini",
+          "enabled": true
+        }
+      ]
     }
   ]
 }
 ```
 
-In model-source mode, the proxy fetches model IDs from a custom URL and creates runtime routes for every fetched model. Target model templates support `{model}`.
+Example request:
 
-By default, a single upstream target is disabled for 10 minutes after 3 consecutive failures. Both values can be changed in the UI sidebar and are saved to `circuitBreaker.failureThreshold` and `circuitBreaker.cooldownMinutes` in `data/config.json`. `429` responses enter cooldown immediately so the same rate-limited upstream is not hit repeatedly. Real proxy requests treat all upstream 4xx/5xx statuses as failures, and HydraLLM also treats HTTP 200 responses with an OpenAI-style `error` body or `returned 429` message as upstream failures. If every target in a failover chain is circuit-open, the proxy clears that chain and retries all targets.
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-failover",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": false
+  }'
+```
 
-Failover happens before returning a response to the client. After a streaming response has started, the proxy cannot switch providers mid-stream because bytes have already been sent to the client.
+Streaming request:
+
+```bash
+curl -N http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-failover",
+    "messages": [{"role": "user", "content": "Say hello slowly"}],
+    "stream": true
+  }'
+```
+
+## Benchmark Suggestions
+
+Use a local OpenAI-compatible mock upstream first, then run benchmarks with the same config:
+
+```bash
+oha -z 60s -c 128 -m POST http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-test" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-failover","messages":[{"role":"user","content":"ping"}],"stream":false}'
+```
+
+Track:
+
+- QPS and p50/p95/p99 latency: `oha`, `wrk`, `bombardier`.
+- Memory: Windows Task Manager, `Get-Process hydrallm`, Linux `pidstat -r`.
+- Connection reuse: upstream access logs and `RUST_LOG=reqwest=debug` for short runs.
+- Failover behavior: inject 429/500/timeouts from the primary and verify `/api/stats` plus `x-proxy-target`.
+- Streaming forwarding: use `curl -N` or a streaming benchmark while watching CPU and live status.

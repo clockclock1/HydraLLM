@@ -18,59 +18,58 @@ jobs:
         include:
           - name: windows-amd64
             os: windows-latest
-            target: node24-win-x64
+            target: x86_64-pc-windows-msvc
             artifact: hydrallm-windows-amd64.exe
           - name: windows-arm64
             os: windows-latest
-            target: node24-win-arm64
+            target: aarch64-pc-windows-msvc
             artifact: hydrallm-windows-arm64.exe
           - name: linux-amd64
             os: ubuntu-latest
-            target: node24-linux-x64
+            target: x86_64-unknown-linux-gnu
             artifact: hydrallm-linux-amd64
           - name: linux-arm64
             os: ubuntu-latest
-            target: node24-linux-arm64
+            target: aarch64-unknown-linux-gnu
             artifact: hydrallm-linux-arm64
           - name: macos-amd64
             os: macos-latest
-            target: node24-macos-x64
+            target: x86_64-apple-darwin
             artifact: hydrallm-macos-amd64
           - name: macos-arm64
             os: macos-latest
-            target: node24-macos-arm64
+            target: aarch64-apple-darwin
             artifact: hydrallm-macos-arm64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            ui/package-lock.json
+          targets: ${{ matrix.target }}
 
-      - name: Install root dependencies
-        run: npm ci
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
-      - name: Install UI dependencies
-        run: npm --prefix ui ci
-
-      - name: Build UI
-        run: npm run build:ui
+      - name: Install Linux arm64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build executable
         shell: bash
         run: |
           mkdir -p dist
-          npx pkg . --targets "${{ matrix.target }}" --output "dist/${{ matrix.artifact }}" --no-bytecode --public
-
-      - name: Smoke test server syntax
-        run: node --check server.js
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --locked --target "${{ matrix.target }}"
+          binary="target/${{ matrix.target }}/release/hydrallm"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            binary="${binary}.exe"
+          fi
+          cp "$binary" "dist/${{ matrix.artifact }}"
 
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4

@@ -3,7 +3,10 @@
 node_modules
 ui/node_modules
 ui/dist
+target
 dist
+data/config.json
+data/stats.json
 logs
 output
 *.log
