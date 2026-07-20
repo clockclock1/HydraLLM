@@ -4,7 +4,11 @@ use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +27,12 @@ pub struct ModelSourceCache {
 #[derive(Clone)]
 pub struct ModelSourceService {
     cache: Arc<RwLock<ModelSourceCache>>,
+    client: Client,
+}
+
+#[derive(Clone, Default)]
+pub struct ProviderHealthService {
+    cache: Arc<RwLock<HashMap<String, Value>>>,
     client: Client,
 }
 
@@ -126,6 +136,56 @@ impl ModelSourceService {
     }
 }
 
+impl ProviderHealthService {
+    pub fn new(client: Client) -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            client,
+        }
+    }
+
+    pub fn spawn_periodic_refresh(&self, config: Arc<RwLock<Config>>) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let cfg = config.read().await.clone();
+                service.refresh_configured(&cfg).await;
+            }
+        });
+    }
+
+    pub async fn refresh_configured(&self, cfg: &Config) {
+        self.refresh(configured_providers(cfg)).await;
+    }
+
+    pub async fn cached_for(&self, providers: Vec<Value>) -> Vec<Value> {
+        let cache = self.cache.read().await;
+        providers
+            .into_iter()
+            .map(|provider| cached_provider_health(&cache, &provider))
+            .collect()
+    }
+
+    async fn refresh(&self, providers: Vec<Value>) {
+        if providers.is_empty() {
+            self.cache.write().await.clear();
+            return;
+        }
+        let futures = providers
+            .iter()
+            .map(|provider| check_provider_health(&self.client, provider));
+        let results = futures_util::future::join_all(futures).await;
+        let mut next = HashMap::new();
+        for (provider, result) in providers.into_iter().zip(results.into_iter()) {
+            next.insert(provider_health_key(&provider), result);
+        }
+        *self.cache.write().await = next;
+    }
+}
+
 pub async fn fetch_model_source(
     client: &Client,
     source: &ModelSourceConfig,
@@ -181,11 +241,13 @@ pub async fn check_provider_health(client: &Client, provider: &Value) -> Value {
         "status": "offline",
         "latency": 0u64,
         "models": [],
-        "error": ""
+        "error": "",
+        "checkedAt": 0u64
     });
     if base_url.is_empty() {
         result["latency"] = serde_json::json!(crate::stats::now_ms().saturating_sub(started));
         result["error"] = serde_json::json!("missing baseUrl");
+        result["checkedAt"] = serde_json::json!(crate::stats::now_ms());
         return result;
     }
     let mut req = client
@@ -206,6 +268,7 @@ pub async fn check_provider_health(client: &Client, provider: &Value) -> Value {
                     status.as_u16(),
                     crate::proxy::trim_error(&text)
                 ));
+                result["checkedAt"] = serde_json::json!(crate::stats::now_ms());
                 return result;
             }
             match serde_json::from_str::<Value>(&text) {
@@ -231,33 +294,99 @@ pub async fn check_provider_health(client: &Client, provider: &Value) -> Value {
             });
         }
     }
+    result["checkedAt"] = serde_json::json!(crate::stats::now_ms());
     result
 }
 
 pub fn configured_providers(cfg: &Config) -> Vec<Value> {
+    let mut providers = cfg
+        .providers
+        .iter()
+        .filter(|provider| !provider.base_url.is_empty())
+        .map(|provider| {
+            serde_json::json!({
+                "id": provider.id.clone(),
+                "name": if provider.name.is_empty() { provider.base_url.clone() } else { provider.name.clone() },
+                "baseUrl": provider.base_url.clone(),
+                "apiKey": provider.api_key.clone(),
+                "timeoutMs": provider.timeout_ms.unwrap_or(10_000),
+            })
+        })
+        .collect::<Vec<_>>();
     let mut targets: Vec<TargetConfig> = cfg
         .models
         .iter()
         .flat_map(|model| model.targets.clone())
         .collect();
     targets.extend(cfg.model_source.targets.clone());
-    let mut seen = std::collections::HashSet::new();
-    targets
+    providers.extend(targets
         .into_iter()
         .filter(|target| !target.base_url.is_empty())
-        .filter_map(|target| {
-            let key = format!("{}|{}|{}", target.name, target.base_url, target.api_key);
-            if !seen.insert(key) {
-                return None;
-            }
-            Some(serde_json::json!({
+        .map(|target| {
+            serde_json::json!({
                 "id": format!("{}|{}|{}", target.name, target.base_url, target.api_key),
                 "name": if target.name.is_empty() { target.base_url.clone() } else { target.name.clone() },
                 "baseUrl": target.base_url,
                 "apiKey": target.api_key,
-            }))
-        })
+                "timeoutMs": 10_000,
+            })
+        }));
+
+    let mut seen = HashSet::new();
+    providers
+        .into_iter()
+        .filter(|provider| seen.insert(provider_health_key(provider)))
         .collect()
+}
+
+pub fn provider_health_key(provider: &Value) -> String {
+    let name = provider
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let base_url = provider
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_end_matches('/');
+    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or("");
+    format!("{}|{}|{}", name, base_url, api_key)
+}
+
+fn cached_provider_health(cache: &HashMap<String, Value>, provider: &Value) -> Value {
+    let id = provider
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let name = provider
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let base_url = provider
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_string();
+    let mut value = cache
+        .get(&provider_health_key(provider))
+        .cloned()
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "status": "unknown",
+                "latency": 0u64,
+                "models": [],
+                "error": "",
+                "checkedAt": 0u64
+            })
+        });
+    value["id"] = serde_json::json!(id);
+    value["name"] = serde_json::json!(name);
+    value["baseUrl"] = serde_json::json!(base_url);
+    value
 }
 
 pub fn extract_source_models(payload: &Value) -> Vec<SourceModel> {

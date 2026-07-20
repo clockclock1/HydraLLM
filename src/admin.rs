@@ -1,8 +1,6 @@
 use crate::{
     config::{save_config, Config, ModelConfig},
-    model_source::{
-        check_provider_health, configured_providers, fetch_model_source, filter_source_models,
-    },
+    model_source::{configured_providers, fetch_model_source, filter_source_models},
     AppState,
 };
 use axum::{
@@ -12,8 +10,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::future::join_all;
+use bytes::Bytes;
 use serde_json::{json, Value};
+
+include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
 
 pub async fn login(
     State(state): State<AppState>,
@@ -81,6 +81,64 @@ pub async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Res
     Json(value).into_response()
 }
 
+pub async fn get_page_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(page): Path<String>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+
+    let value = match page.as_str() {
+        "dashboard" => {
+            let stats = state.stats.snapshot().await;
+            json!({
+                "startedAt": stats.started_at,
+                "requests": stats.requests,
+                "successes": stats.successes,
+                "failures": stats.failures,
+                "failovers": stats.failovers,
+                "chains": stats.chains,
+                "logs": stats.logs.into_iter().take(10).collect::<Vec<_>>(),
+            })
+        }
+        "chains" => {
+            let stats = state.stats.snapshot().await;
+            json!({
+                "requests": stats.requests,
+                "successes": stats.successes,
+                "failures": stats.failures,
+                "failovers": stats.failovers,
+                "chains": stats.chains,
+            })
+        }
+        "model-stats" => {
+            let stats = state.stats.snapshot().await;
+            json!({
+                "requests": stats.requests,
+                "successes": stats.successes,
+                "failures": stats.failures,
+                "failovers": stats.failovers,
+                "channelModels": stats.channel_models,
+            })
+        }
+        "live-status" => json!({
+            "activeThreads": state.proxy_runtime.snapshot_threads(),
+            "memory": process_memory(),
+        }),
+        "logs" => {
+            let stats = state.stats.snapshot().await;
+            json!({
+                "logs": stats.logs,
+            })
+        }
+        _ => json!({}),
+    };
+    Json(value).into_response()
+}
+
 pub async fn health(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     let models = state.model_source.runtime_models(&cfg).await;
@@ -109,10 +167,7 @@ pub async fn providers_health(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_else(|| configured_providers(&cfg));
-    let futures = providers
-        .iter()
-        .map(|provider| check_provider_health(&state.client, provider));
-    let results = join_all(futures).await;
+    let results = state.provider_health.cached_for(providers).await;
     Json(json!({ "ok": true, "providers": results })).into_response()
 }
 
@@ -211,50 +266,38 @@ pub async fn model_tests_run(
 }
 
 pub async fn static_ui() -> Response {
-    named_asset(
-        "index.html",
-        include_str!("../assets/index.html"),
-        "text/html; charset=utf-8",
-    )
+    embedded_response("index.html")
 }
 
 pub async fn app_css() -> Response {
-    named_asset(
-        "app.css",
-        include_str!("../assets/app.css"),
-        "text/css; charset=utf-8",
-    )
+    embedded_response("app.css")
 }
 
 pub async fn app_js() -> Response {
-    named_asset(
-        "app.js",
-        include_str!("../assets/app.js"),
-        "application/javascript; charset=utf-8",
-    )
+    embedded_response("app.js")
 }
 
 pub async fn app_core_js() -> Response {
-    named_asset(
-        "app-core.js",
-        include_str!("../assets/app-core.js"),
-        "application/javascript; charset=utf-8",
-    )
+    embedded_response("app-core.js")
+}
+
+pub async fn static_chunk(Path(path): Path<String>) -> Response {
+    embedded_response(&format!("chunks/{}", sanitize_asset_path(&path)))
 }
 
 pub async fn static_asset(Path(path): Path<String>) -> Response {
-    let response = match path.as_str() {
-        "app.css" => app_css().await,
-        "app.js" => app_js().await,
-        "app-core.js" => app_core_js().await,
-        "index.html" => static_ui().await,
-        _ => return send_error(StatusCode::NOT_FOUND, "Not Found", None),
-    };
-    response
+    embedded_response(&sanitize_asset_path(&path))
 }
 
-fn named_asset(name: &str, body: &'static str, content_type: &'static str) -> Response {
-    let mut response = Response::new(Body::from(body));
+fn embedded_response(path: &str) -> Response {
+    let Some((body, content_type)) = embedded_asset(path) else {
+        return send_error(StatusCode::NOT_FOUND, "Not Found", None);
+    };
+    named_asset(path, body, content_type)
+}
+
+fn named_asset(name: &str, body: &'static [u8], content_type: &'static str) -> Response {
+    let mut response = Response::new(Body::from(Bytes::from_static(body)));
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -267,6 +310,15 @@ fn named_asset(name: &str, body: &'static str, content_type: &'static str) -> Re
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response
+}
+
+fn sanitize_asset_path(path: &str) -> String {
+    path.split('/')
+        .filter(|segment| {
+            !segment.is_empty() && *segment != "." && *segment != ".." && !segment.contains('\\')
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 async fn test_model(client: &reqwest::Client, target: &Value, capabilities: &[String]) -> Value {

@@ -49,6 +49,7 @@ pub struct AppState {
     pub stats: stats::StatsStore,
     pub circuit_breakers: circuit::CircuitBreakers,
     pub model_source: model_source::ModelSourceService,
+    pub provider_health: model_source::ProviderHealthService,
     pub proxy_runtime: proxy::ProxyRuntime,
     pub auth: auth::AuthState,
     pub client: Client,
@@ -90,13 +91,17 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let stats = stats::StatsStore::load(stats_path.clone()).await?;
     stats.spawn_periodic_save();
+    let config_state = Arc::new(RwLock::new(cfg));
+    let provider_health = model_source::ProviderHealthService::new(client.clone());
+    provider_health.spawn_periodic_refresh(config_state.clone());
     let state = AppState {
-        config: Arc::new(RwLock::new(cfg)),
+        config: config_state,
         config_path: Arc::new(config_path.clone()),
         stats_path: Arc::new(stats_path.clone()),
         stats,
         circuit_breakers: circuit::CircuitBreakers::default(),
         model_source: model_source::ModelSourceService::new(client.clone()),
+        provider_health,
         proxy_runtime: proxy::ProxyRuntime::default(),
         auth: auth::AuthState::default(),
         client,
@@ -127,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
             get(admin::get_config).post(admin::post_config),
         )
         .route("/api/stats", get(admin::get_stats))
+        .route("/api/stats/page/{page}", get(admin::get_page_stats))
         .route("/api/providers/health", post(admin::providers_health))
         .route("/api/model-tests/run", post(admin::model_tests_run))
         .route(
@@ -150,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/app.css", get(admin::app_css))
         .route("/app.js", get(admin::app_js))
         .route("/app-core.js", get(admin::app_core_js))
+        .route("/chunks/{*path}", get(admin::static_chunk))
         .route("/assets/{*path}", get(admin::static_asset))
         .route("/v1/models", get(proxy::list_models))
         .route("/models", get(proxy::list_models))

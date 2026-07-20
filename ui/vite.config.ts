@@ -14,12 +14,12 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: 'app.js',
-        chunkFileNames: 'app-core.js',
-        assetFileNames: 'app.css',
-        manualChunks(id) {
-          if (!id.endsWith('/src/main.tsx') && !id.endsWith('\\src\\main.tsx')) {
-            return 'app-core';
+        chunkFileNames: 'chunks/[name].js',
+        assetFileNames(assetInfo) {
+          if (assetInfo.names?.some(name => name.endsWith('.css'))) {
+            return 'app.css';
           }
+          return 'assets/[name][extname]';
         },
       },
     },
