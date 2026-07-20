@@ -4,7 +4,10 @@ node_modules
 ui/node_modules
 ui/dist
 target
-dist
+dist/*
+!dist/
+!dist/hydrallm-linux-amd64
+!dist/hydrallm-linux-arm64
 data/config.json
 data/stats.json
 logs
