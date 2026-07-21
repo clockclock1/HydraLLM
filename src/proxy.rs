@@ -1,6 +1,9 @@
 use crate::{
     auth,
-    config::{target_label, upstream_url, Config, FailoverStrategy, ModelConfig, TargetConfig},
+    config::{
+        endpoint_suffix, target_label, trim_slashes, Config, FailoverStrategy, ModelConfig,
+        TargetConfig,
+    },
     stats::{now_ms, FailureInfo, LogEntry, StatsStore},
     AppState,
 };
@@ -33,6 +36,44 @@ enum ProxyCallError {
     Timeout,
     #[error(transparent)]
     Request(#[from] reqwest::Error),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ProxyEndpoint {
+    ChatCompletions,
+    Responses,
+    Completions,
+}
+
+impl ProxyEndpoint {
+    fn from_path(path: &str) -> Self {
+        match endpoint_suffix(path).as_str() {
+            "responses" => Self::Responses,
+            "completions" => Self::Completions,
+            _ => Self::ChatCompletions,
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+            Self::Completions => "completions",
+        }
+    }
+
+    fn candidates(self) -> [Self; 3] {
+        match self {
+            Self::ChatCompletions => [Self::ChatCompletions, Self::Responses, Self::Completions],
+            Self::Responses => [Self::Responses, Self::ChatCompletions, Self::Completions],
+            Self::Completions => [Self::Completions, Self::ChatCompletions, Self::Responses],
+        }
+    }
+}
+
+struct CompatibleUpstream {
+    response: reqwest::Response,
+    endpoint: ProxyEndpoint,
 }
 
 impl ProxyCallError {
@@ -308,6 +349,7 @@ async fn proxy_loop(
 ) -> Response {
     state.stats.chain_request(&model.public_name).await;
     let started_at = now_ms();
+    let requested_endpoint = ProxyEndpoint::from_path(pathname);
     let is_stream = body.get("stream").and_then(Value::as_bool) == Some(true);
     let mut errors: Vec<AttemptError> = Vec::new();
     let mut failed_models: Vec<String> = Vec::new();
@@ -384,11 +426,11 @@ async fn proxy_loop(
             let upstream = match call_target(
                 &state.client,
                 headers,
-                pathname,
                 body,
                 &target,
                 cfg,
                 is_stream,
+                requested_endpoint,
             )
             .await
             {
@@ -441,6 +483,8 @@ async fn proxy_loop(
                 }
             };
 
+            let used_endpoint = upstream.endpoint;
+            let upstream = upstream.response;
             let status = upstream.status();
             let response_type = upstream
                 .headers()
@@ -627,11 +671,114 @@ async fn proxy_loop(
                         .join(", "),
                 )
                 .await;
+                let text = transform_response_text(
+                    requested_endpoint,
+                    used_endpoint,
+                    &text,
+                    requested_model,
+                    &target,
+                )
+                .unwrap_or(text);
                 return raw_response(
                     status,
                     response_type,
                     text,
                     Some((&target.name, &target.model_name)),
+                );
+            }
+
+            if used_endpoint != requested_endpoint {
+                let text = upstream.text().await.unwrap_or_default();
+                if let Some(failure) = classify_upstream_failure(status.as_u16(), &text, true, true)
+                {
+                    state
+                        .circuit_breakers
+                        .record_failure(
+                            model,
+                            &target,
+                            cfg,
+                            &state.stats,
+                            failure.clone(),
+                            now_ms().saturating_sub(target_started),
+                        )
+                        .await;
+                    let err_item = AttemptError {
+                        target: label.clone(),
+                        attempt: Some(attempt),
+                        status: Some(failure.status),
+                        message: failure.message.clone(),
+                        detail: Some(failure.body.clone()),
+                    };
+                    state
+                        .proxy_runtime
+                        .append_error(thread_id, err_item.clone());
+                    errors.push(err_item);
+                    if should_retry_target(&failure, cfg, attempt, max_attempts, model) {
+                        continue;
+                    }
+                    failed_models.push(label);
+                    if should_try_next(failure.status, cfg) {
+                        break;
+                    }
+                    state.stats.chain_failure(&model.public_name).await;
+                    log_request(
+                        &state.stats,
+                        model,
+                        requested_model,
+                        &failed_models,
+                        "",
+                        "failed",
+                        started_at,
+                        &failure.message,
+                    )
+                    .await;
+                    return send_error(
+                        StatusCode::from_u16(failure.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        &failure.message,
+                        None,
+                    );
+                }
+                state
+                    .circuit_breakers
+                    .record_success(
+                        model,
+                        &target,
+                        cfg,
+                        &state.stats,
+                        now_ms().saturating_sub(target_started),
+                    )
+                    .await;
+                state
+                    .stats
+                    .chain_success(&model.public_name, !failed_models.is_empty())
+                    .await;
+                state.proxy_runtime.update_thread(thread_id, |thread| {
+                    thread.phase = "streaming".to_string();
+                    thread.status = format!("正在以兼容路由返回 {}", label);
+                    thread.failed_models = failed_models.clone();
+                });
+                log_request(
+                    &state.stats,
+                    model,
+                    requested_model,
+                    &failed_models,
+                    &label,
+                    "success",
+                    started_at,
+                    &errors
+                        .iter()
+                        .map(format_attempt_error)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+                .await;
+                return synthetic_stream_response(
+                    requested_endpoint,
+                    used_endpoint,
+                    &text,
+                    requested_model,
+                    &target,
+                    _slot.into_stream_guard(),
                 );
             }
 
@@ -887,45 +1034,651 @@ fn rotate_targets(mut targets: Vec<TargetConfig>, start: usize) -> Vec<TargetCon
 async fn call_target(
     client: &Client,
     inbound_headers: &HeaderMap,
-    pathname: &str,
     body: &Value,
     target: &TargetConfig,
     cfg: &Config,
     is_stream: bool,
-) -> Result<reqwest::Response, ProxyCallError> {
-    let mut next_body = body.clone();
-    if let Some(obj) = next_body.as_object_mut() {
-        obj.insert(
-            "model".to_string(),
-            Value::String(if target.model_name.is_empty() {
-                body.get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                target.model_name.clone()
-            }),
-        );
-    }
-    let mut req = client
-        .post(upstream_url(target, pathname))
-        .header(header::CONTENT_TYPE, "application/json")
-        .bearer_auth(&target.api_key)
-        .body(serde_json::to_vec(&next_body).unwrap_or_default());
-    if let Some(value) = inbound_headers.get("openai-organization") {
-        req = req.header("openai-organization", value);
-    }
-    if let Some(value) = inbound_headers.get("openai-project") {
-        req = req.header("openai-project", value);
-    }
+    requested_endpoint: ProxyEndpoint,
+) -> Result<CompatibleUpstream, ProxyCallError> {
     let timeout = target_timeout(target, cfg);
-    if is_stream {
-        match tokio::time::timeout(timeout, req.send()).await {
-            Ok(result) => Ok(result?),
-            Err(_) => Err(ProxyCallError::Timeout),
+    let candidates = requested_endpoint.candidates();
+    for (idx, endpoint) in candidates.into_iter().enumerate() {
+        let upstream_stream = is_stream && endpoint == requested_endpoint;
+        let next_body =
+            build_upstream_body(body, target, requested_endpoint, endpoint, upstream_stream);
+        let mut req = client
+            .post(upstream_endpoint_url(target, endpoint))
+            .header(header::CONTENT_TYPE, "application/json")
+            .bearer_auth(&target.api_key)
+            .body(serde_json::to_vec(&next_body).unwrap_or_default());
+        if let Some(value) = inbound_headers.get("openai-organization") {
+            req = req.header("openai-organization", value);
         }
+        if let Some(value) = inbound_headers.get("openai-project") {
+            req = req.header("openai-project", value);
+        }
+        let response = if upstream_stream {
+            match tokio::time::timeout(timeout, req.send()).await {
+                Ok(result) => result?,
+                Err(_) => return Err(ProxyCallError::Timeout),
+            }
+        } else {
+            req.timeout(timeout).send().await?
+        };
+        if response.status().is_success() || idx == 2 {
+            return Ok(CompatibleUpstream { response, endpoint });
+        }
+        if is_endpoint_unsupported_status(response.status()) {
+            continue;
+        }
+        return Ok(CompatibleUpstream { response, endpoint });
+    }
+    unreachable!("endpoint candidate list is non-empty")
+}
+
+fn is_endpoint_unsupported_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 404 | 405 | 501)
+}
+
+fn upstream_endpoint_url(target: &TargetConfig, endpoint: ProxyEndpoint) -> String {
+    format!("{}/{}", trim_slashes(&target.base_url), endpoint.suffix())
+}
+
+fn build_upstream_body(
+    body: &Value,
+    target: &TargetConfig,
+    requested: ProxyEndpoint,
+    upstream: ProxyEndpoint,
+    stream: bool,
+) -> Value {
+    if requested == upstream {
+        let mut next = body.clone();
+        set_request_model_and_stream(&mut next, target, Some(stream));
+        return next;
+    }
+
+    let model = target_request_model(body, target);
+    let mut out = serde_json::Map::new();
+    out.insert("model".to_string(), Value::String(model));
+    out.insert("stream".to_string(), Value::Bool(stream));
+    match upstream {
+        ProxyEndpoint::ChatCompletions => {
+            out.insert(
+                "messages".to_string(),
+                Value::Array(request_to_chat_messages(body, requested)),
+            );
+            copy_request_fields(
+                body,
+                &mut out,
+                &[
+                    "temperature",
+                    "top_p",
+                    "presence_penalty",
+                    "frequency_penalty",
+                    "stop",
+                    "tools",
+                    "tool_choice",
+                    "response_format",
+                    "seed",
+                    "user",
+                    "metadata",
+                ],
+            );
+            if let Some(value) = body
+                .get("max_tokens")
+                .or_else(|| body.get("max_output_tokens"))
+            {
+                out.insert("max_tokens".to_string(), value.clone());
+            }
+        }
+        ProxyEndpoint::Responses => {
+            if let Some(instructions) = request_instructions(body, requested) {
+                out.insert("instructions".to_string(), Value::String(instructions));
+            }
+            out.insert(
+                "input".to_string(),
+                request_to_responses_input(body, requested),
+            );
+            copy_request_fields(
+                body,
+                &mut out,
+                &[
+                    "temperature",
+                    "top_p",
+                    "tools",
+                    "tool_choice",
+                    "response_format",
+                    "reasoning",
+                    "truncation",
+                    "metadata",
+                    "user",
+                ],
+            );
+            if let Some(value) = body
+                .get("max_output_tokens")
+                .or_else(|| body.get("max_tokens"))
+            {
+                out.insert("max_output_tokens".to_string(), value.clone());
+            }
+        }
+        ProxyEndpoint::Completions => {
+            out.insert(
+                "prompt".to_string(),
+                Value::String(request_to_prompt(body, requested)),
+            );
+            copy_request_fields(
+                body,
+                &mut out,
+                &[
+                    "temperature",
+                    "top_p",
+                    "presence_penalty",
+                    "frequency_penalty",
+                    "stop",
+                    "suffix",
+                    "echo",
+                    "logprobs",
+                    "best_of",
+                    "seed",
+                    "user",
+                ],
+            );
+            if let Some(value) = body
+                .get("max_tokens")
+                .or_else(|| body.get("max_output_tokens"))
+            {
+                out.insert("max_tokens".to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+fn set_request_model_and_stream(body: &mut Value, target: &TargetConfig, stream: Option<bool>) {
+    let model = target_request_model(body, target);
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("model".to_string(), Value::String(model));
+        if let Some(stream) = stream {
+            obj.insert("stream".to_string(), Value::Bool(stream));
+        }
+    }
+}
+
+fn target_request_model(body: &Value, target: &TargetConfig) -> String {
+    if target.model_name.is_empty() {
+        body.get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
     } else {
-        Ok(req.timeout(timeout).send().await?)
+        target.model_name.clone()
+    }
+}
+
+fn copy_request_fields(body: &Value, out: &mut serde_json::Map<String, Value>, fields: &[&str]) {
+    for field in fields {
+        if let Some(value) = body.get(*field) {
+            out.insert((*field).to_string(), value.clone());
+        }
+    }
+}
+
+fn request_to_chat_messages(body: &Value, requested: ProxyEndpoint) -> Vec<Value> {
+    if requested == ProxyEndpoint::ChatCompletions {
+        return body
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![chat_message("user", "")]);
+    }
+    let mut messages = Vec::new();
+    if let Some(instructions) = request_instructions(body, requested) {
+        messages.push(chat_message("system", instructions));
+    }
+    match requested {
+        ProxyEndpoint::Responses => {
+            messages.extend(responses_input_to_chat_messages(body.get("input")));
+        }
+        ProxyEndpoint::Completions => {
+            messages.push(chat_message("user", request_to_prompt(body, requested)));
+        }
+        ProxyEndpoint::ChatCompletions => {}
+    }
+    if messages.is_empty() {
+        messages.push(chat_message("user", ""));
+    }
+    messages
+}
+
+fn responses_input_to_chat_messages(input: Option<&Value>) -> Vec<Value> {
+    match input {
+        Some(Value::String(text)) => vec![chat_message("user", text)],
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                if item.get("role").is_some() || item.get("content").is_some() {
+                    let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+                    json!({
+                        "role": role,
+                        "content": map_content_parts(item.get("content"), true)
+                    })
+                } else {
+                    chat_message("user", value_to_text(item))
+                }
+            })
+            .collect(),
+        Some(value) => vec![chat_message("user", value_to_text(value))],
+        None => Vec::new(),
+    }
+}
+
+fn request_to_responses_input(body: &Value, requested: ProxyEndpoint) -> Value {
+    match requested {
+        ProxyEndpoint::Responses => body.get("input").cloned().unwrap_or(Value::String(String::new())),
+        ProxyEndpoint::ChatCompletions => Value::Array(
+            body.get("messages")
+                .and_then(Value::as_array)
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .filter(|message| {
+                            !message
+                                .get("role")
+                                .and_then(Value::as_str)
+                                .is_some_and(|role| role == "system" || role == "developer")
+                        })
+                        .map(|message| {
+                            json!({
+                                "role": message.get("role").and_then(Value::as_str).unwrap_or("user"),
+                                "content": map_content_parts(message.get("content"), false)
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        ),
+        ProxyEndpoint::Completions => Value::String(request_to_prompt(body, requested)),
+    }
+}
+
+fn request_instructions(body: &Value, requested: ProxyEndpoint) -> Option<String> {
+    if let Some(value) = body
+        .get("instructions")
+        .or_else(|| body.get("system"))
+        .and_then(Value::as_str)
+    {
+        return Some(value.to_string());
+    }
+    if requested == ProxyEndpoint::ChatCompletions {
+        let instructions = body
+            .get("messages")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter(|message| {
+                message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| role == "system" || role == "developer")
+            })
+            .map(|message| value_to_text(message.get("content").unwrap_or(&Value::Null)))
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !instructions.is_empty() {
+            return Some(instructions);
+        }
+    }
+    None
+}
+
+fn request_to_prompt(body: &Value, requested: ProxyEndpoint) -> String {
+    match requested {
+        ProxyEndpoint::Completions => body.get("prompt").map(value_to_text).unwrap_or_default(),
+        ProxyEndpoint::Responses => {
+            let mut parts = Vec::new();
+            if let Some(instructions) = request_instructions(body, requested) {
+                parts.push(format!("system: {}", instructions));
+            }
+            parts.push(value_to_text(body.get("input").unwrap_or(&Value::Null)));
+            parts.join("\n")
+        }
+        ProxyEndpoint::ChatCompletions => body
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        let role = message
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or("user");
+                        let content = value_to_text(message.get("content").unwrap_or(&Value::Null));
+                        format!("{}: {}", role, content)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn chat_message(role: &str, content: impl Into<String>) -> Value {
+    json!({ "role": role, "content": content.into() })
+}
+
+fn map_content_parts(content: Option<&Value>, to_chat: bool) -> Value {
+    match content {
+        Some(Value::Array(parts)) => Value::Array(
+            parts
+                .iter()
+                .map(|part| {
+                    let mut next = part.clone();
+                    if let Some(obj) = next.as_object_mut() {
+                        if let Some(kind) =
+                            obj.get("type").and_then(Value::as_str).map(str::to_string)
+                        {
+                            let mapped = match (to_chat, kind.as_str()) {
+                                (true, "input_text") | (true, "output_text") => Some("text"),
+                                (true, "input_image") => Some("image_url"),
+                                (false, "text") => Some("input_text"),
+                                (false, "image_url") => Some("input_image"),
+                                _ => None,
+                            };
+                            if let Some(mapped) = mapped {
+                                obj.insert("type".to_string(), Value::String(mapped.to_string()));
+                            }
+                        }
+                    }
+                    next
+                })
+                .collect(),
+        ),
+        Some(value) => value.clone(),
+        None => Value::String(String::new()),
+    }
+}
+
+fn transform_response_text(
+    requested: ProxyEndpoint,
+    upstream: ProxyEndpoint,
+    text: &str,
+    requested_model: &str,
+    target: &TargetConfig,
+) -> Option<String> {
+    if requested == upstream {
+        return None;
+    }
+    let payload = parse_json_safe(text)?;
+    let transformed = response_payload_as(requested, upstream, &payload, requested_model, target);
+    serde_json::to_string(&transformed).ok()
+}
+
+fn response_payload_as(
+    requested: ProxyEndpoint,
+    upstream: ProxyEndpoint,
+    payload: &Value,
+    requested_model: &str,
+    target: &TargetConfig,
+) -> Value {
+    match requested {
+        ProxyEndpoint::ChatCompletions => {
+            response_as_chat(upstream, payload, requested_model, target)
+        }
+        ProxyEndpoint::Responses => {
+            response_as_responses(upstream, payload, requested_model, target)
+        }
+        ProxyEndpoint::Completions => {
+            response_as_completions(upstream, payload, requested_model, target)
+        }
+    }
+}
+
+fn response_as_chat(
+    upstream: ProxyEndpoint,
+    payload: &Value,
+    requested_model: &str,
+    target: &TargetConfig,
+) -> Value {
+    let text = response_text(upstream, payload);
+    let finish_reason = response_finish_reason(payload);
+    json!({
+        "id": response_id(payload, "chatcmpl"),
+        "object": "chat.completion",
+        "created": response_created(payload),
+        "model": requested_model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": text,
+                "refusal": Value::Null,
+            },
+            "finish_reason": finish_reason,
+        }],
+        "usage": payload.get("usage").cloned().unwrap_or_else(|| json!({})),
+        "hydrallm_upstream": {
+            "endpoint": upstream.suffix(),
+            "target": target.name,
+            "model": target.model_name,
+        }
+    })
+}
+
+fn response_as_responses(
+    upstream: ProxyEndpoint,
+    payload: &Value,
+    requested_model: &str,
+    target: &TargetConfig,
+) -> Value {
+    let text = response_text(upstream, payload);
+    json!({
+        "id": response_id(payload, "resp"),
+        "object": "response",
+        "created_at": response_created(payload),
+        "status": "completed",
+        "model": requested_model,
+        "output": [{
+            "type": "message",
+            "id": format!("msg_{}", now_ms()),
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": text,
+                "annotations": []
+            }]
+        }],
+        "output_text": text,
+        "usage": payload.get("usage").cloned().unwrap_or_else(|| json!({})),
+        "hydrallm_upstream": {
+            "endpoint": upstream.suffix(),
+            "target": target.name,
+            "model": target.model_name,
+        }
+    })
+}
+
+fn response_as_completions(
+    upstream: ProxyEndpoint,
+    payload: &Value,
+    requested_model: &str,
+    target: &TargetConfig,
+) -> Value {
+    let text = response_text(upstream, payload);
+    let finish_reason = response_finish_reason(payload);
+    json!({
+        "id": response_id(payload, "cmpl"),
+        "object": "text_completion",
+        "created": response_created(payload),
+        "model": requested_model,
+        "choices": [{
+            "text": text,
+            "index": 0,
+            "logprobs": Value::Null,
+            "finish_reason": finish_reason
+        }],
+        "usage": payload.get("usage").cloned().unwrap_or_else(|| json!({})),
+        "hydrallm_upstream": {
+            "endpoint": upstream.suffix(),
+            "target": target.name,
+            "model": target.model_name,
+        }
+    })
+}
+
+fn response_text(upstream: ProxyEndpoint, payload: &Value) -> String {
+    match upstream {
+        ProxyEndpoint::ChatCompletions => assistant_text(payload),
+        ProxyEndpoint::Responses => payload
+            .get("output_text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| responses_output_text(payload)),
+        ProxyEndpoint::Completions => payload
+            .pointer("/choices/0/text")
+            .map(value_to_text)
+            .unwrap_or_default(),
+    }
+}
+
+fn responses_output_text(payload: &Value) -> String {
+    payload
+        .get("output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .flat_map(|item| {
+                    item.get("content")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .map(|part| value_to_text(&part))
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn response_finish_reason(payload: &Value) -> String {
+    payload
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("finish_reason").and_then(Value::as_str))
+        .unwrap_or("stop")
+        .to_string()
+}
+
+fn response_created(payload: &Value) -> u64 {
+    payload
+        .get("created")
+        .or_else(|| payload.get("created_at"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| now_ms() / 1000)
+}
+
+fn response_id(payload: &Value, prefix: &str) -> String {
+    payload
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}-{}", prefix, now_ms()))
+}
+
+fn value_to_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(value_to_text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(obj) => obj
+            .get("text")
+            .or_else(|| obj.get("content"))
+            .or_else(|| obj.get("input_text"))
+            .or_else(|| obj.get("output_text"))
+            .map(value_to_text)
+            .unwrap_or_else(|| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+fn synthetic_stream_response(
+    requested: ProxyEndpoint,
+    upstream: ProxyEndpoint,
+    text: &str,
+    requested_model: &str,
+    target: &TargetConfig,
+    slot: StreamSlotGuard,
+) -> Response {
+    let payload = parse_json_safe(text).unwrap_or_else(|| json!({ "output_text": text }));
+    let transformed = response_payload_as(requested, upstream, &payload, requested_model, target);
+    let stream_text = synthetic_sse_text(requested, &transformed);
+    let body_stream = async_stream::stream! {
+        let slot_guard = slot;
+        yield Ok::<Bytes, Infallible>(Bytes::from(stream_text));
+        drop(slot_guard);
+    };
+    let mut response = Response::new(Body::from_stream(body_stream));
+    *response.status_mut() = StatusCode::OK;
+    insert_common_proxy_headers(
+        response.headers_mut(),
+        "text/event-stream",
+        &target.name,
+        &target.model_name,
+        true,
+    );
+    response
+}
+
+fn synthetic_sse_text(endpoint: ProxyEndpoint, payload: &Value) -> String {
+    let text = response_text(endpoint, payload);
+    match endpoint {
+        ProxyEndpoint::ChatCompletions => {
+            let chunk_id = response_id(payload, "chatcmpl");
+            let created = response_created(payload);
+            let model = payload.get("model").and_then(Value::as_str).unwrap_or("");
+            let first = json!({
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": Value::Null}]
+            });
+            let done = json!({
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": response_finish_reason(payload)}]
+            });
+            format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", first, done)
+        }
+        ProxyEndpoint::Responses => {
+            let delta = json!({ "type": "response.output_text.delta", "delta": text });
+            let completed = json!({ "type": "response.completed", "response": payload });
+            format!(
+                "event: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
+                delta, completed
+            )
+        }
+        ProxyEndpoint::Completions => {
+            let chunk = json!({
+                "id": response_id(payload, "cmpl"),
+                "object": "text_completion",
+                "created": response_created(payload),
+                "model": payload.get("model").and_then(Value::as_str).unwrap_or(""),
+                "choices": [{"text": text, "index": 0, "logprobs": Value::Null, "finish_reason": response_finish_reason(payload)}]
+            });
+            format!("data: {}\n\ndata: [DONE]\n\n", chunk)
+        }
     }
 }
 
@@ -1507,4 +2260,111 @@ async fn log_request(
             ..LogEntry::default()
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target() -> TargetConfig {
+        TargetConfig {
+            name: "upstream".to_string(),
+            base_url: "http://example.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model_name: "real-model".to_string(),
+            ..TargetConfig::default()
+        }
+    }
+
+    #[test]
+    fn chat_request_can_be_routed_to_responses_upstream() {
+        let body = json!({
+            "model": "public-model",
+            "messages": [
+                {"role": "system", "content": "be concise"},
+                {"role": "user", "content": "hello"}
+            ],
+            "max_tokens": 12,
+            "stream": true
+        });
+        let converted = build_upstream_body(
+            &body,
+            &target(),
+            ProxyEndpoint::ChatCompletions,
+            ProxyEndpoint::Responses,
+            false,
+        );
+        assert_eq!(converted["model"], "real-model");
+        assert_eq!(converted["stream"], false);
+        assert_eq!(converted["instructions"], "be concise");
+        assert_eq!(converted["max_output_tokens"], 12);
+        assert_eq!(converted["input"][0]["role"], "user");
+        assert_eq!(converted["input"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn responses_request_can_be_routed_to_chat_upstream() {
+        let body = json!({
+            "model": "public-model",
+            "instructions": "answer in json",
+            "input": "ping",
+            "max_output_tokens": 8
+        });
+        let converted = build_upstream_body(
+            &body,
+            &target(),
+            ProxyEndpoint::Responses,
+            ProxyEndpoint::ChatCompletions,
+            false,
+        );
+        assert_eq!(converted["model"], "real-model");
+        assert_eq!(converted["messages"][0]["role"], "system");
+        assert_eq!(converted["messages"][0]["content"], "answer in json");
+        assert_eq!(converted["messages"][1]["role"], "user");
+        assert_eq!(converted["messages"][1]["content"], "ping");
+        assert_eq!(converted["max_tokens"], 8);
+    }
+
+    #[test]
+    fn completions_response_can_be_returned_as_chat_response() {
+        let upstream = json!({
+            "id": "cmpl-1",
+            "object": "text_completion",
+            "created": 123,
+            "model": "real-model",
+            "choices": [{"text": "pong", "finish_reason": "stop"}],
+            "usage": {"total_tokens": 3}
+        });
+        let converted = response_payload_as(
+            ProxyEndpoint::ChatCompletions,
+            ProxyEndpoint::Completions,
+            &upstream,
+            "public-model",
+            &target(),
+        );
+        assert_eq!(converted["object"], "chat.completion");
+        assert_eq!(converted["model"], "public-model");
+        assert_eq!(converted["choices"][0]["message"]["content"], "pong");
+        assert_eq!(converted["usage"]["total_tokens"], 3);
+    }
+
+    #[test]
+    fn responses_response_can_be_returned_as_completions_response() {
+        let upstream = json!({
+            "id": "resp-1",
+            "created_at": 456,
+            "output_text": "done",
+            "usage": {"output_tokens": 1}
+        });
+        let converted = response_payload_as(
+            ProxyEndpoint::Completions,
+            ProxyEndpoint::Responses,
+            &upstream,
+            "public-model",
+            &target(),
+        );
+        assert_eq!(converted["object"], "text_completion");
+        assert_eq!(converted["choices"][0]["text"], "done");
+        assert_eq!(converted["created"], 456);
+    }
 }

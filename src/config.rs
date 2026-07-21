@@ -392,14 +392,6 @@ pub fn endpoint_suffix(path: &str) -> String {
     }
 }
 
-pub fn upstream_url(target: &TargetConfig, path: &str) -> String {
-    format!(
-        "{}/{}",
-        trim_slashes(&target.base_url),
-        endpoint_suffix(path)
-    )
-}
-
 pub fn target_key(model: &ModelConfig, target: &TargetConfig) -> String {
     format!(
         "{}/{}/{}/{}",
