@@ -41,6 +41,8 @@ struct Cli {
     request_logs_path: Option<PathBuf>,
     #[arg(long, env = "MODEL_STATS_PATH")]
     model_stats_path: Option<PathBuf>,
+    #[arg(long, env = "RUNTIME_STATS_PATH")]
+    runtime_stats_path: Option<PathBuf>,
     #[arg(long, env = "BODY_LIMIT_MB", default_value_t = 50)]
     body_limit_mb: usize,
 }
@@ -49,7 +51,7 @@ struct Cli {
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub config_path: Arc<PathBuf>,
-    pub stats_path: Arc<PathBuf>,
+    pub runtime_stats_path: Arc<PathBuf>,
     pub stats: stats::StatsStore,
     pub circuit_breakers: circuit::CircuitBreakers,
     pub model_source: model_source::ModelSourceService,
@@ -87,6 +89,9 @@ async fn main() -> anyhow::Result<()> {
     let model_stats_path = cli
         .model_stats_path
         .unwrap_or_else(|| data_dir.join("model-stats.csv"));
+    let runtime_stats_path = cli
+        .runtime_stats_path
+        .unwrap_or_else(|| data_dir.join("runtime-stats.csv"));
 
     let cfg = load_config(&config_path).await?;
     let client = Client::builder()
@@ -103,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         stats_path.clone(),
         request_logs_path.clone(),
         model_stats_path.clone(),
+        runtime_stats_path.clone(),
         cfg.log_settings.clone(),
     )
     .await?;
@@ -113,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         config: config_state,
         config_path: Arc::new(config_path.clone()),
-        stats_path: Arc::new(stats_path.clone()),
+        runtime_stats_path: Arc::new(runtime_stats_path.clone()),
         stats,
         circuit_breakers: circuit::CircuitBreakers::default(),
         model_source: model_source::ModelSourceService::new(client.clone()),

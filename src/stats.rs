@@ -21,6 +21,8 @@ const REQUEST_LOGS_CSV_HEADER: &str =
     "id,timestamp,chainName,originalModel,failedModels,failedModelErrors,finalModel,status,latency,error\n";
 const MODEL_STATS_CSV_HEADER: &str =
     "channel,baseUrl,model,requests,successes,failures,lastStatus,lastError,lastLatencyMs,updatedAt\n";
+const RUNTIME_STATS_CSV_HEADER: &str =
+    "kind,key,model,target,upstreamModel,baseUrl,requests,successes,failures,failovers,ok,error,consecutiveFailures,disabledUntil,lastStatus,lastError,lastLatencyMs,avgLatencyMs\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -108,12 +110,22 @@ pub struct LogModelError {
     pub error: String,
 }
 
+#[derive(Default)]
+struct RuntimeStatsSnapshot {
+    requests: u64,
+    successes: u64,
+    failures: u64,
+    failovers: u64,
+    chains: BTreeMap<String, ChainStats>,
+    targets: BTreeMap<String, TargetStats>,
+}
+
 #[derive(Clone)]
 pub struct StatsStore {
     inner: Arc<RwLock<Stats>>,
-    path: Arc<PathBuf>,
     logs_path: Arc<PathBuf>,
     model_stats_path: Arc<PathBuf>,
+    runtime_stats_path: Arc<PathBuf>,
     log_settings: Arc<RwLock<LogSettingsConfig>>,
     save_queued: Arc<AtomicBool>,
 }
@@ -160,22 +172,28 @@ impl Default for LogEntry {
 
 impl StatsStore {
     pub async fn load(
-        path: PathBuf,
+        legacy_stats_path: PathBuf,
         logs_path: PathBuf,
         model_stats_path: PathBuf,
+        runtime_stats_path: PathBuf,
         log_settings: LogSettingsConfig,
     ) -> Result<Self> {
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = runtime_stats_path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        let legacy_stats = match fs::read_to_string(&path).await {
-            Ok(text) => Some(
-                serde_json::from_str::<Stats>(&text)
-                    .unwrap_or_default()
-                    .normalize(),
-            ),
-            Err(err) if err.kind() == ErrorKind::NotFound => None,
-            Err(err) => return Err(err.into()),
+        let runtime_stats = load_runtime_stats_csv(&runtime_stats_path).await?;
+        let legacy_stats = if runtime_stats.is_some() {
+            None
+        } else {
+            match fs::read_to_string(&legacy_stats_path).await {
+                Ok(text) => Some(
+                    serde_json::from_str::<Stats>(&text)
+                        .unwrap_or_default()
+                        .normalize(),
+                ),
+                Err(err) if err.kind() == ErrorKind::NotFound => None,
+                Err(err) => return Err(err.into()),
+            }
         };
         let mut stats = legacy_stats.clone().unwrap_or_default();
         if let Ok(logs) = load_request_logs_csv(&logs_path).await {
@@ -189,20 +207,27 @@ impl StatsStore {
                     .map(|item| item.channel_models.clone()),
             );
         }
+        if let Some(runtime_stats) = runtime_stats {
+            stats.requests = runtime_stats.requests;
+            stats.successes = runtime_stats.successes;
+            stats.failures = runtime_stats.failures;
+            stats.failovers = runtime_stats.failovers;
+            stats.chains = runtime_stats.chains;
+            stats.targets = runtime_stats.targets;
+        } else if legacy_stats.is_none() {
+            rebuild_chain_totals_from_logs(&mut stats);
+        }
         let log_settings = normalize_log_settings(log_settings);
         apply_log_limits(&mut stats.logs, &log_settings);
         let store = Self {
             inner: Arc::new(RwLock::new(stats)),
-            path: Arc::new(path),
             logs_path: Arc::new(logs_path),
             model_stats_path: Arc::new(model_stats_path),
+            runtime_stats_path: Arc::new(runtime_stats_path),
             log_settings: Arc::new(RwLock::new(log_settings)),
             save_queued: Arc::new(AtomicBool::new(false)),
         };
         store.save_now().await?;
-        if legacy_stats.is_some() {
-            store.remove_legacy_stats_json().await?;
-        }
         Ok(store)
     }
 
@@ -224,16 +249,7 @@ impl StatsStore {
         let snapshot = self.snapshot().await;
         save_request_logs_csv(&self.logs_path, &snapshot.logs).await?;
         save_model_stats_csv(&self.model_stats_path, &snapshot.channel_models).await?;
-        self.remove_legacy_stats_json().await?;
-        Ok(())
-    }
-
-    async fn remove_legacy_stats_json(&self) -> Result<()> {
-        match fs::remove_file(&*self.path).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
-        }
+        save_runtime_stats_csv(&self.runtime_stats_path, &snapshot).await
     }
 
     pub fn spawn_periodic_save(&self) {
@@ -587,14 +603,40 @@ fn trim_persisted_string(value: &str) -> String {
     value.chars().take(1500).collect()
 }
 
-#[cfg(test)]
-fn stats_json_payload(stats: &Stats) -> serde_json::Value {
-    let mut value = serde_json::to_value(stats).unwrap_or_else(|_| serde_json::json!({}));
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("logs");
-        obj.remove("channelModels");
+fn rebuild_chain_totals_from_logs(stats: &mut Stats) {
+    stats.requests = 0;
+    stats.successes = 0;
+    stats.failures = 0;
+    stats.failovers = 0;
+    stats.chains.clear();
+
+    for log in &stats.logs {
+        stats.requests += 1;
+        let succeeded = log.status == "success";
+        let failed_over = succeeded && !log.failed_models.is_empty();
+        if succeeded {
+            stats.successes += 1;
+            if failed_over {
+                stats.failovers += 1;
+            }
+        } else {
+            stats.failures += 1;
+        }
+        if log.chain_name.is_empty() {
+            continue;
+        }
+
+        let chain = stats.chains.entry(log.chain_name.clone()).or_default();
+        chain.requests += 1;
+        if succeeded {
+            chain.successes += 1;
+            if failed_over {
+                chain.failovers += 1;
+            }
+        } else {
+            chain.failures += 1;
+        }
     }
-    value
 }
 
 fn merge_logs(mut csv_logs: Vec<LogEntry>, legacy_logs: Option<Vec<LogEntry>>) -> Vec<LogEntry> {
@@ -841,6 +883,143 @@ async fn load_model_stats_csv(path: &PathBuf) -> Result<BTreeMap<String, Channel
     Ok(channels)
 }
 
+async fn save_runtime_stats_csv(path: &PathBuf, stats: &Stats) -> Result<()> {
+    let mut text = String::from(RUNTIME_STATS_CSV_HEADER);
+    push_csv_row(
+        &mut text,
+        &[
+            "summary".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            stats.requests.to_string(),
+            stats.successes.to_string(),
+            stats.failures.to_string(),
+            stats.failovers.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ],
+    );
+    for (name, chain) in &stats.chains {
+        push_csv_row(
+            &mut text,
+            &[
+                "chain".to_string(),
+                name.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                chain.requests.to_string(),
+                chain.successes.to_string(),
+                chain.failures.to_string(),
+                chain.failovers.to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+        );
+    }
+    for (key, target) in &stats.targets {
+        push_csv_row(
+            &mut text,
+            &[
+                "target".to_string(),
+                key.clone(),
+                target.model.clone(),
+                target.target.clone(),
+                target.upstream_model.clone(),
+                target.base_url.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                target.ok.to_string(),
+                target.error.to_string(),
+                target.consecutive_failures.to_string(),
+                target.disabled_until.to_string(),
+                target.last_status.to_string(),
+                target.last_error.clone(),
+                target.last_latency_ms.to_string(),
+                target.avg_latency_ms.to_string(),
+            ],
+        );
+    }
+    atomic_write(path, text.into_bytes()).await
+}
+
+async fn load_runtime_stats_csv(path: &PathBuf) -> Result<Option<RuntimeStatsSnapshot>> {
+    let text = match fs::read_to_string(path).await {
+        Ok(text) => text,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut snapshot = RuntimeStatsSnapshot::default();
+    let mut found = false;
+    for row in parse_csv(&text)
+        .into_iter()
+        .skip(1)
+        .filter(|row| row.len() >= 18)
+    {
+        match row[0].as_str() {
+            "summary" => {
+                snapshot.requests = row[6].parse().unwrap_or(0);
+                snapshot.successes = row[7].parse().unwrap_or(0);
+                snapshot.failures = row[8].parse().unwrap_or(0);
+                snapshot.failovers = row[9].parse().unwrap_or(0);
+                found = true;
+            }
+            "chain" if !row[1].is_empty() => {
+                snapshot.chains.insert(
+                    row[1].clone(),
+                    ChainStats {
+                        requests: row[6].parse().unwrap_or(0),
+                        successes: row[7].parse().unwrap_or(0),
+                        failures: row[8].parse().unwrap_or(0),
+                        failovers: row[9].parse().unwrap_or(0),
+                    },
+                );
+                found = true;
+            }
+            "target" if !row[1].is_empty() => {
+                snapshot.targets.insert(
+                    row[1].clone(),
+                    TargetStats {
+                        model: row[2].clone(),
+                        target: row[3].clone(),
+                        upstream_model: row[4].clone(),
+                        base_url: row[5].clone(),
+                        ok: row[10].parse().unwrap_or(0),
+                        error: row[11].parse().unwrap_or(0),
+                        consecutive_failures: row[12].parse().unwrap_or(0),
+                        disabled_until: row[13].parse().unwrap_or(0),
+                        last_status: row[14].parse().unwrap_or(0),
+                        last_error: row[15].clone(),
+                        last_latency_ms: row[16].parse().unwrap_or(0),
+                        avg_latency_ms: row[17].parse().unwrap_or(0),
+                    },
+                );
+                found = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(found.then_some(snapshot))
+}
+
 async fn atomic_write(path: &PathBuf, bytes: Vec<u8>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
@@ -992,6 +1171,22 @@ mod tests {
         }
     }
 
+    fn request_log(
+        id: usize,
+        chain_name: &str,
+        status: &str,
+        failed_models: Vec<&str>,
+    ) -> LogEntry {
+        LogEntry {
+            id: id.to_string(),
+            timestamp: id as u64,
+            chain_name: chain_name.to_string(),
+            status: status.to_string(),
+            failed_models: failed_models.into_iter().map(str::to_string).collect(),
+            ..LogEntry::default()
+        }
+    }
+
     fn model_stat(requests: u64, updated_at: u64, status: u16) -> ChannelModelItemStats {
         ChannelModelItemStats {
             name: "model-a".to_string(),
@@ -1029,28 +1224,6 @@ mod tests {
 
         assert_eq!(logs.len(), REQUEST_LOG_LIMIT);
         assert_eq!(logs.last().map(|entry| entry.id.as_str()), Some("499"));
-    }
-
-    #[test]
-    fn stats_json_payload_excludes_csv_backed_fields() {
-        let mut stats = Stats::default();
-        stats.logs.push(log(1));
-        stats.channel_models.insert(
-            "provider".to_string(),
-            ChannelModelStats {
-                name: "provider".to_string(),
-                ..ChannelModelStats::default()
-            },
-        );
-
-        let value = stats_json_payload(&stats);
-
-        assert!(value.get("logs").is_none());
-        assert!(value.get("channelModels").is_none());
-        assert_eq!(
-            value.get("requests").and_then(|item| item.as_u64()),
-            Some(0)
-        );
     }
 
     #[test]
@@ -1125,12 +1298,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_migrates_legacy_stats_json_into_csv_then_removes_it() -> Result<()> {
+    async fn load_rebuilds_chain_totals_from_request_logs() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("hydrallm-stats-rebuild-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).await?;
+        let stats_path = dir.join("stats.json");
+        let logs_path = dir.join("request-logs.csv");
+        let model_stats_path = dir.join("model-stats.csv");
+        let runtime_stats_path = dir.join("runtime-stats.csv");
+        save_request_logs_csv(
+            &logs_path,
+            &[
+                request_log(1, "auto-code", "success", vec![]),
+                request_log(2, "auto-code", "success", vec!["primary"]),
+                request_log(3, "auto-grok", "failed", vec!["primary"]),
+            ],
+        )
+        .await?;
+
+        let store = StatsStore::load(
+            stats_path.clone(),
+            logs_path,
+            model_stats_path,
+            runtime_stats_path.clone(),
+            LogSettingsConfig::default(),
+        )
+        .await?;
+        let snapshot = store.snapshot().await;
+
+        assert_eq!(snapshot.requests, 3);
+        assert_eq!(snapshot.successes, 2);
+        assert_eq!(snapshot.failures, 1);
+        assert_eq!(snapshot.failovers, 1);
+        assert_eq!(snapshot.chains["auto-code"].requests, 2);
+        assert_eq!(snapshot.chains["auto-code"].successes, 2);
+        assert_eq!(snapshot.chains["auto-code"].failovers, 1);
+        assert_eq!(snapshot.chains["auto-grok"].failures, 1);
+        assert!(!stats_path.exists());
+        assert!(runtime_stats_path.exists());
+
+        fs::remove_dir_all(&dir).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_stats_csv_persists_chain_and_target_state() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("hydrallm-runtime-stats-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).await?;
+        let path = dir.join("runtime-stats.csv");
+        let mut stats = Stats::default();
+        stats.requests = 12;
+        stats.successes = 10;
+        stats.failures = 2;
+        stats.failovers = 3;
+        stats.chains.insert(
+            "auto-code".to_string(),
+            ChainStats {
+                requests: 12,
+                successes: 10,
+                failures: 2,
+                failovers: 3,
+            },
+        );
+        stats.targets.insert(
+            "auto-code/provider/model/url".to_string(),
+            TargetStats {
+                model: "auto-code".to_string(),
+                target: "provider".to_string(),
+                upstream_model: "model".to_string(),
+                base_url: "https://example.test/v1".to_string(),
+                ok: 10,
+                error: 2,
+                consecutive_failures: 1,
+                disabled_until: 42,
+                last_status: 429,
+                last_error: "rate limit".to_string(),
+                last_latency_ms: 120,
+                avg_latency_ms: 95,
+            },
+        );
+
+        save_runtime_stats_csv(&path, &stats).await?;
+        let restored = load_runtime_stats_csv(&path).await?.expect("runtime stats");
+
+        assert_eq!(restored.requests, 12);
+        assert_eq!(restored.chains["auto-code"].failovers, 3);
+        assert_eq!(
+            restored.targets["auto-code/provider/model/url"].last_status,
+            429
+        );
+        assert_eq!(
+            restored.targets["auto-code/provider/model/url"].last_error,
+            "rate limit"
+        );
+
+        fs::remove_dir_all(&dir).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_migrates_legacy_stats_json_into_csv_without_rewriting_it() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("hydrallm-stats-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).await?;
         let stats_path = dir.join("stats.json");
         let logs_path = dir.join("request-logs.csv");
         let model_stats_path = dir.join("model-stats.csv");
+        let runtime_stats_path = dir.join("runtime-stats.csv");
 
         let mut legacy = Stats::default();
         legacy.requests = 9;
@@ -1174,6 +1448,7 @@ mod tests {
             stats_path.clone(),
             logs_path.clone(),
             model_stats_path.clone(),
+            runtime_stats_path.clone(),
             LogSettingsConfig::default(),
         )
         .await?;
@@ -1181,7 +1456,8 @@ mod tests {
         let migrated_logs = load_request_logs_csv(&logs_path).await?;
         let migrated_models = load_model_stats_csv(&model_stats_path).await?;
 
-        assert!(!stats_path.exists());
+        assert!(stats_path.exists());
+        assert!(runtime_stats_path.exists());
         assert_eq!(snapshot.requests, 9);
         assert_eq!(migrated_logs.len(), 3);
         assert_eq!(

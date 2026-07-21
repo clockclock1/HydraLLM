@@ -37,7 +37,8 @@ export interface FailoverChain {
   createdAt: number;
   totalRequests: number;
   failoverCount: number;
-  successRate: number;
+  // `null` means the backend has not recorded a completed request yet.
+  successRate: number | null;
 }
 
 export type Page = 'dashboard' | 'providers' | 'model-tests' | 'chains' | 'model-stats' | 'endpoints' | 'live-status' | 'logs';

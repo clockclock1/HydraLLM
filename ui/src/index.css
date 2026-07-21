@@ -1453,17 +1453,13 @@ button:active {
   line-height: 1.45;
 }
 
-.uiverse-shell .log-action-button .button-content-layer {
-  gap: 0.45rem;
-}
-
-.uiverse-shell .log-action-button svg {
+.uiverse-shell .log-action-button .log-action-icon {
   position: relative;
-  z-index: 3;
+  z-index: 1;
   display: block !important;
-  width: 0.95rem !important;
-  min-width: 0.95rem !important;
-  height: 0.95rem !important;
+  width: 1rem !important;
+  min-width: 1rem !important;
+  height: 1rem !important;
   opacity: 1 !important;
   color: currentColor !important;
   fill: none !important;

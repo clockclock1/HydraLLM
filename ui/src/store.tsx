@@ -397,8 +397,7 @@ function applyStatsToState(state: State, stats: BackendStats): State {
     chains: hasChains ? state.chains.map((chain) => {
       const modelStats = stats.chains?.[chain.proxyModelName];
       if (!modelStats) return chain;
-      const totalFinished = modelStats.successes + modelStats.failures;
-      const successRate = totalFinished ? Number(((modelStats.successes / totalFinished) * 100).toFixed(1)) : 100;
+      const successRate = successRateFromStats(modelStats.successes, modelStats.failures);
       return {
         ...chain,
         totalRequests: modelStats.requests,
@@ -502,8 +501,7 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
     const modelStats = stats?.chains?.[model.publicName];
     const modelCircuitBreaker = model.circuitBreaker || config.circuitBreaker || defaultConfig.circuitBreaker;
     const totalRequests = modelStats?.requests || 0;
-    const totalFinished = (modelStats?.successes || 0) + (modelStats?.failures || 0);
-    const successRate = totalFinished ? Number((((modelStats?.successes || 0) / totalFinished) * 100).toFixed(1)) : 100;
+    const successRate = successRateFromStats(modelStats?.successes || 0, modelStats?.failures || 0);
     const models = (model.targets || []).map((target, index) => {
       const providerId = ensureProvider(target);
       const provider = providers.find(item => item.id === providerId);
@@ -566,6 +564,11 @@ function backendToUi(config: BackendConfig, stats?: BackendStats | null): Pick<S
 
 function providerKey(baseUrl: string, apiKey: string, name: string, apiKeys: string[] = [], apiKeyMode: Provider['apiKeyMode'] = 'single') {
   return `${baseUrl || ''}||${apiKey || ''}||${name || ''}||${apiKeyMode}||${apiKeys.join('\n')}`;
+}
+
+function successRateFromStats(successes: number, failures: number): number | null {
+  const finished = successes + failures;
+  return finished ? Number(((successes / finished) * 100).toFixed(1)) : null;
 }
 
 function uniqueStrings(items: string[]) {

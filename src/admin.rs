@@ -211,7 +211,7 @@ pub async fn health(State(state): State<AppState>) -> Response {
         "ok": true,
         "startedAt": state.stats.snapshot().await.started_at,
         "configPath": state.config_path.to_string_lossy(),
-        "statsPath": state.stats_path.to_string_lossy(),
+        "runtimeStatsPath": state.runtime_stats_path.to_string_lossy(),
         "models": models.into_iter().map(|m| m.public_name).collect::<Vec<_>>(),
         "modelSourceError": state.model_source.error().await
     }))

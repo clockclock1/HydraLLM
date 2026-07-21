@@ -20,7 +20,7 @@ HydraLLM 是一个 OpenAI 兼容的大模型故障转移代理，内置可视化
 - 被动故障检测：真实代理请求触发转移和熔断，管理界面健康检查只更新在线状态与延迟。
 - 代理请求不再限制每个模型的并发线程数；请求或流结束后实时线程记录立即释放。
 - 统计与日志：总请求、成功、失败、转移次数，按模型和 target 的细粒度统计，请求日志，实时线程，进程内存占用。
-- 配置持久化：`data/config.json` 原子写入；请求日志和模型统计分别保存到 CSV，旧 `data/stats.json` 会在启动时自动迁移后删除。
+- 配置持久化：`data/config.json` 原子写入；请求日志、模型统计和运行统计分别保存到 CSV。旧 `data/stats.json` 仅用于兼容迁移，不会被修改。
 - 管理界面以内嵌多文件前端形式随服务二进制发布，无需额外前端运行时。
 - CORS、请求超时、body limit、优雅关闭和结构化日志。
 
@@ -60,7 +60,8 @@ cargo run
 - 配置文件：`data/config.json`
 - 请求日志：`data/request-logs.csv`
 - 模型统计：`data/model-stats.csv`
-- 旧统计迁移文件：`data/stats.json`（启动时自动合并到 CSV 后删除）
+- 运行统计：`data/runtime-stats.csv`
+- `data/stats.json` 仅在首次迁移时读取，之后不再使用或写入
 
 首次运行时，如果 `data/config.json` 不存在，程序会自动创建默认配置。
 
@@ -71,9 +72,10 @@ HOST=0.0.0.0
 PORT=8787
 DATA_DIR=./data
 CONFIG_PATH=./data/config.json
-STATS_PATH=./data/stats.json  # legacy migration only
+STATS_PATH=./data/stats.json  # 仅用于兼容迁移，不会写入
 REQUEST_LOGS_PATH=./data/request-logs.csv
 MODEL_STATS_PATH=./data/model-stats.csv
+RUNTIME_STATS_PATH=./data/runtime-stats.csv
 BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
 RUST_LOG=hydrallm=info,tower_http=info
@@ -280,7 +282,7 @@ HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI.
 - Passive failure detection: real proxy requests trigger failover and circuit breaking; UI health checks only update observed provider status and latency.
 - Proxy requests are no longer capped by per-model thread slots. Active thread records are released immediately when the request or stream finishes.
 - Stats and logs: total requests, successes, failures, failovers, per-model and per-target stats, request logs, live threads, and process memory.
-- Config persistence: `data/config.json` is saved atomically; request logs and model stats are stored as CSV files, and legacy `data/stats.json` is migrated on startup then removed.
+- Config persistence: `data/config.json` is saved atomically; request logs, model stats, and runtime stats are stored as CSV files. Legacy `data/stats.json` is read only for compatibility migration and is never modified.
 - Embedded multi-file admin UI served from the service binary. No extra frontend runtime is required.
 - CORS, request timeout, body limit, graceful shutdown, and structured logging.
 
@@ -320,7 +322,8 @@ Defaults:
 - Config: `data/config.json`
 - Request logs: `data/request-logs.csv`
 - Model stats: `data/model-stats.csv`
-- Legacy stats migration file: `data/stats.json` (merged into CSV on startup, then removed)
+- Runtime stats: `data/runtime-stats.csv`
+- `data/stats.json` is read only for first-run migration and is never written or removed
 
 On first run, the server creates `data/config.json` automatically if it does not exist.
 
@@ -331,9 +334,10 @@ HOST=0.0.0.0
 PORT=8787
 DATA_DIR=./data
 CONFIG_PATH=./data/config.json
-STATS_PATH=./data/stats.json  # legacy migration only
+STATS_PATH=./data/stats.json  # legacy migration input only; never written
 REQUEST_LOGS_PATH=./data/request-logs.csv
 MODEL_STATS_PATH=./data/model-stats.csv
+RUNTIME_STATS_PATH=./data/runtime-stats.csv
 BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
 RUST_LOG=hydrallm=info,tower_http=info

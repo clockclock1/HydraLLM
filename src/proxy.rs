@@ -2572,15 +2572,22 @@ mod tests {
         let stats_path = dir.join("stats.json");
         let logs_path = dir.join("request-logs.csv");
         let model_stats_path = dir.join("model-stats.csv");
+        let runtime_stats_path = dir.join("runtime-stats.csv");
         let cfg = Config::default();
         let client = Client::new();
         AppState {
             config: Arc::new(RwLock::new(cfg.clone())),
             config_path: Arc::new(PathBuf::from("config.json")),
-            stats_path: Arc::new(stats_path.clone()),
-            stats: StatsStore::load(stats_path, logs_path, model_stats_path, cfg.log_settings)
-                .await
-                .expect("stats store"),
+            runtime_stats_path: Arc::new(runtime_stats_path.clone()),
+            stats: StatsStore::load(
+                stats_path,
+                logs_path,
+                model_stats_path,
+                runtime_stats_path,
+                cfg.log_settings,
+            )
+            .await
+            .expect("stats store"),
             circuit_breakers: crate::circuit::CircuitBreakers::default(),
             model_source: crate::model_source::ModelSourceService::new(client.clone()),
             provider_health: crate::model_source::ProviderHealthService::new(client.clone()),

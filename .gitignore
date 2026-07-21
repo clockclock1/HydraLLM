@@ -7,6 +7,7 @@
 /data/stats.json
 /data/request-logs.csv
 /data/model-stats.csv
+/data/runtime-stats.csv
 /deploy/compose/.env
 *.tmp
 HydraLLM-main.zip
