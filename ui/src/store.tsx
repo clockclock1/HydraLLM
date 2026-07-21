@@ -98,6 +98,7 @@ interface State {
   authChecked: boolean;
   configLoaded: boolean;
   pageStatsLoading: boolean;
+  statsRefreshNonce: number;
   saveStatus: 'idle' | 'loading' | 'saving' | 'saved' | 'error';
   saveError: string;
   hasUnsavedChanges: boolean;
@@ -187,6 +188,7 @@ const initialState: State = {
   authChecked: false,
   configLoaded: false,
   pageStatsLoading: true,
+  statsRefreshNonce: 0,
   saveStatus: 'idle',
   saveError: '',
   hasUnsavedChanges: false,
@@ -233,13 +235,23 @@ function markConfigChanged(state: State, updates: Partial<State>): State {
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
-    case 'SET_PAGE':
-      if (state.currentPage === action.page) return state;
+    case 'SET_PAGE': {
+      const hasPageStats = Boolean(pageStatsPath(action.page));
+      if (state.currentPage === action.page) {
+        if (!state.configLoaded || !hasPageStats) return state;
+        return {
+          ...state,
+          pageStatsLoading: true,
+          statsRefreshNonce: state.statsRefreshNonce + 1,
+        };
+      }
       return {
         ...state,
         currentPage: action.page,
-        pageStatsLoading: state.configLoaded && Boolean(pageStatsPath(action.page)),
+        pageStatsLoading: state.configLoaded && hasPageStats,
+        statsRefreshNonce: state.statsRefreshNonce + 1,
       };
+    }
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarCollapsed: !state.sidebarCollapsed };
     case 'SET_ADMIN_TOKEN':
@@ -256,6 +268,7 @@ function reducer(state: State, action: Action): State {
         authChecked: true,
         configLoaded: false,
         pageStatsLoading: false,
+        statsRefreshNonce: 0,
         backendConfig: null,
         backendStats: null,
         providers: [],
@@ -285,7 +298,8 @@ function reducer(state: State, action: Action): State {
         authenticated: true,
         authChecked: true,
         configLoaded: true,
-        pageStatsLoading: state.configLoaded ? state.pageStatsLoading : Boolean(pageStatsPath(state.currentPage)),
+        pageStatsLoading: Boolean(pageStatsPath(state.currentPage)),
+        statsRefreshNonce: state.statsRefreshNonce + 1,
         saveStatus: 'idle',
         saveError: '',
         hasUnsavedChanges: false,
@@ -841,7 +855,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       activeController?.abort();
       window.clearInterval(timer);
     };
-  }, [state.configLoaded, state.currentPage, fetchPageStats]);
+  }, [state.configLoaded, state.currentPage, state.statsRefreshNonce, fetchPageStats]);
 
   useEffect(() => {
     if (!state.configLoaded || !state.providers.length || !pageNeedsProviderHealth(state.currentPage)) return;
