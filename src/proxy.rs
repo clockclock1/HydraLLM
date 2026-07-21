@@ -248,8 +248,9 @@ impl Drop for StreamSlotGuard {
 }
 
 fn release_proxy_slot(runtime: ProxyRuntime, thread_id: String) {
-    tracing::info!(thread_id = %thread_id, "proxy thread removed");
-    runtime.active_threads.remove(&thread_id);
+    if runtime.active_threads.remove(&thread_id).is_some() {
+        tracing::info!(thread_id = %thread_id, "proxy thread removed");
+    }
 }
 
 pub async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -2042,34 +2043,30 @@ impl Drop for StreamAbortGuard {
         let model = self.model.clone();
         let thread_id = self.thread_id.clone();
         let requested_model = self.requested_model.clone();
-        let mut failed_models = self.failed_models.clone();
-        let mut request_errors = self.request_errors.clone();
+        let failed_models = self.failed_models.clone();
+        let request_errors = self.request_errors.clone();
         let label = self.label.clone();
         let started_at = self.started_at;
+        release_proxy_slot(state.proxy_runtime.clone(), thread_id.clone());
         tokio::spawn(async move {
             let message = "客户端在流式响应完成前断开连接".to_string();
-            let err_item = AttemptError {
-                target: label.clone(),
-                message: message.clone(),
-                ..AttemptError::default()
-            };
-            failed_models.push(label.clone());
-            request_errors.push(err_item.clone());
-            state.proxy_runtime.append_error(&thread_id, err_item);
             state.proxy_runtime.update_thread(&thread_id, |thread| {
-                thread.phase = "failed".to_string();
+                thread.phase = "completed".to_string();
                 thread.status = message.clone();
                 thread.failed_models = failed_models.clone();
             });
-            state.stats.chain_failure(&model.public_name).await;
+            state
+                .stats
+                .chain_success(&model.public_name, !failed_models.is_empty())
+                .await;
             log_request(
                 &state.stats,
                 &model,
                 &requested_model,
                 &failed_models,
                 &request_errors,
-                "",
-                "failed",
+                &label,
+                "success",
                 started_at,
                 &message,
             )
@@ -2513,6 +2510,10 @@ fn failed_model_error_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+    use std::{path::PathBuf, sync::Arc};
+    use tokio::sync::RwLock;
+    use uuid::Uuid;
 
     fn target() -> TargetConfig {
         TargetConfig {
@@ -2522,6 +2523,48 @@ mod tests {
             model_name: "real-model".to_string(),
             ..TargetConfig::default()
         }
+    }
+
+    async fn test_state() -> AppState {
+        let dir = std::env::temp_dir().join(format!("hydrallm-proxy-test-{}", Uuid::new_v4()));
+        let stats_path = dir.join("stats.json");
+        let logs_path = dir.join("request-logs.csv");
+        let model_stats_path = dir.join("model-stats.csv");
+        let cfg = Config::default();
+        let client = Client::new();
+        AppState {
+            config: Arc::new(RwLock::new(cfg.clone())),
+            config_path: Arc::new(PathBuf::from("config.json")),
+            stats_path: Arc::new(stats_path.clone()),
+            stats: StatsStore::load(stats_path, logs_path, model_stats_path, cfg.log_settings)
+                .await
+                .expect("stats store"),
+            circuit_breakers: crate::circuit::CircuitBreakers::default(),
+            model_source: crate::model_source::ModelSourceService::new(client.clone()),
+            provider_health: crate::model_source::ProviderHealthService::new(client.clone()),
+            proxy_runtime: ProxyRuntime::default(),
+            auth: crate::auth::AuthState::default(),
+            client,
+        }
+    }
+
+    fn model() -> ModelConfig {
+        ModelConfig {
+            public_name: "public-model".to_string(),
+            targets: vec![target()],
+            ..ModelConfig::default()
+        }
+    }
+
+    async fn wait_for_abort_success_log(state: &AppState) -> crate::stats::Stats {
+        for _ in 0..50 {
+            let snapshot = state.stats.snapshot().await;
+            if snapshot.successes == 1 && !snapshot.logs.is_empty() {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        state.stats.snapshot().await
     }
 
     #[test]
@@ -2664,5 +2707,91 @@ mod tests {
 
         assert!(!detector.observe(&Bytes::from_static(b"data: [DO")));
         assert!(detector.observe(&Bytes::from_static(b"NE]\n\n")));
+    }
+
+    #[tokio::test]
+    async fn stream_abort_guard_releases_active_thread_immediately() {
+        let state = test_state().await;
+        let model = model();
+        let slot = state.proxy_runtime.acquire(&model, "public-model").await;
+        let thread_id = slot.thread_id.as_ref().expect("thread id").clone();
+
+        let guard = StreamAbortGuard::new(
+            state.clone(),
+            model,
+            thread_id.clone(),
+            "public-model".to_string(),
+            Vec::new(),
+            Vec::new(),
+            "upstream|real-model".to_string(),
+            now_ms(),
+        );
+
+        assert_eq!(state.proxy_runtime.snapshot_threads().len(), 1);
+        drop(guard);
+        assert!(state.proxy_runtime.snapshot_threads().is_empty());
+        drop(slot);
+        assert!(state.proxy_runtime.snapshot_threads().is_empty());
+
+        let stats = wait_for_abort_success_log(&state).await;
+        assert_eq!(stats.successes, 1);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.logs[0].status, "success");
+        assert_eq!(stats.logs[0].final_model, "upstream|real-model");
+        assert!(stats.logs[0]
+            .error
+            .contains("客户端在流式响应完成前断开连接"));
+        assert!(stats.logs[0].failed_models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_body_after_first_chunk_releases_thread() {
+        let state = test_state().await;
+        let model = model();
+        let target = target();
+        let slot = state.proxy_runtime.acquire(&model, "public-model").await;
+        let inspected = StreamInspection {
+            chunks: vec![Bytes::from_static(b"data: {\"delta\":\"hello\"}\n\n")],
+            stream: None,
+            failure: None,
+        };
+
+        let response = stream_response(
+            state.clone(),
+            model,
+            target,
+            Config::default(),
+            slot.thread_id.as_ref().expect("thread id").clone(),
+            "public-model".to_string(),
+            Vec::new(),
+            Vec::new(),
+            "upstream|real-model".to_string(),
+            now_ms(),
+            now_ms(),
+            StatusCode::OK,
+            "text/event-stream".to_string(),
+            inspected,
+            false,
+            slot.into_stream_guard(),
+        );
+        let mut body = response.into_body();
+
+        let first = body.frame().await.expect("first frame").expect("frame");
+        assert_eq!(
+            first.into_data().expect("data"),
+            Bytes::from_static(b"data: {\"delta\":\"hello\"}\n\n")
+        );
+        drop(body);
+
+        assert!(state.proxy_runtime.snapshot_threads().is_empty());
+
+        let stats = wait_for_abort_success_log(&state).await;
+        assert_eq!(stats.successes, 1);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.logs[0].status, "success");
+        assert_eq!(stats.logs[0].final_model, "upstream|real-model");
+        assert!(stats.logs[0]
+            .error
+            .contains("客户端在流式响应完成前断开连接"));
     }
 }

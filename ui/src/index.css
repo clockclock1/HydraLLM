@@ -1444,6 +1444,24 @@ button:active {
   line-height: 1.45;
 }
 
+.uiverse-shell .log-action-button .button-content-layer {
+  gap: 0.45rem;
+}
+
+.uiverse-shell .log-action-button svg {
+  position: relative;
+  z-index: 3;
+  display: block !important;
+  width: 0.95rem !important;
+  min-width: 0.95rem !important;
+  height: 0.95rem !important;
+  opacity: 1 !important;
+  color: currentColor !important;
+  fill: none !important;
+  stroke: currentColor !important;
+  stroke-width: 2.4;
+}
+
 .uiverse-shell tbody tr {
   border-color: rgba(125, 211, 252, 0.12) !important;
 }
