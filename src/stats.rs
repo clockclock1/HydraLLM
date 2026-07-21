@@ -12,6 +12,8 @@ use std::{
 use tokio::{fs, sync::RwLock};
 use uuid::Uuid;
 
+const REQUEST_LOG_LIMIT: usize = 500;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Stats {
@@ -313,8 +315,7 @@ impl StatsStore {
         }
         entry.error = trim_persisted_string(&entry.error);
         self.mutate(|stats| {
-            stats.logs.insert(0, entry);
-            trim_logs(&mut stats.logs);
+            push_request_log(&mut stats.logs, entry);
         })
         .await;
     }
@@ -454,12 +455,57 @@ fn chrono_like_now() -> String {
 }
 
 fn trim_logs(logs: &mut Vec<LogEntry>) {
-    logs.truncate(500);
-    if logs.capacity() > 600 {
+    logs.truncate(REQUEST_LOG_LIMIT);
+    if logs.capacity() > REQUEST_LOG_LIMIT + 100 {
+        logs.shrink_to_fit();
+    }
+}
+
+fn push_request_log(logs: &mut Vec<LogEntry>, entry: LogEntry) {
+    if logs.len() >= REQUEST_LOG_LIMIT {
+        logs.truncate(REQUEST_LOG_LIMIT - 1);
+    }
+    logs.insert(0, entry);
+    if logs.capacity() > REQUEST_LOG_LIMIT + 100 {
         logs.shrink_to_fit();
     }
 }
 
 fn trim_persisted_string(value: &str) -> String {
     value.chars().take(1500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn log(id: usize) -> LogEntry {
+        LogEntry {
+            id: id.to_string(),
+            timestamp: id as u64,
+            ..LogEntry::default()
+        }
+    }
+
+    #[test]
+    fn push_request_log_replaces_oldest_when_full() {
+        let mut logs = (0..REQUEST_LOG_LIMIT).map(log).collect::<Vec<_>>();
+
+        push_request_log(&mut logs, log(REQUEST_LOG_LIMIT));
+
+        assert_eq!(logs.len(), REQUEST_LOG_LIMIT);
+        assert_eq!(logs.first().map(|entry| entry.id.as_str()), Some("500"));
+        assert_eq!(logs.last().map(|entry| entry.id.as_str()), Some("498"));
+        assert!(!logs.iter().any(|entry| entry.id == "499"));
+    }
+
+    #[test]
+    fn trim_logs_keeps_only_limit() {
+        let mut logs = (0..REQUEST_LOG_LIMIT + 10).map(log).collect::<Vec<_>>();
+
+        trim_logs(&mut logs);
+
+        assert_eq!(logs.len(), REQUEST_LOG_LIMIT);
+        assert_eq!(logs.last().map(|entry| entry.id.as_str()), Some("499"));
+    }
 }
