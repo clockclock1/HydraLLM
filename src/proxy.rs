@@ -892,6 +892,16 @@ async fn proxy_loop(
                 );
             }
 
+            state
+                .circuit_breakers
+                .record_success(
+                    model,
+                    &target,
+                    cfg,
+                    &state.stats,
+                    now_ms().saturating_sub(target_started),
+                )
+                .await;
             state.proxy_runtime.update_thread(thread_id, |thread| {
                 thread.phase = "streaming".to_string();
                 thread.status = format!("正在流式转发 {}", label);
@@ -1763,14 +1773,14 @@ fn stream_response(
     state: AppState,
     model: ModelConfig,
     target: TargetConfig,
-    cfg: Config,
+    _cfg: Config,
     thread_id: String,
     requested_model: String,
     failed_models: Vec<String>,
     failed_errors: Vec<AttemptError>,
     label: String,
     started_at: u64,
-    target_started: u64,
+    _target_started: u64,
     status: StatusCode,
     response_type: String,
     mut inspected: StreamInspection,
@@ -1782,6 +1792,16 @@ fn stream_response(
     let body_stream = async_stream::stream! {
         let slot_guard = slot;
         let mut request_errors = failed_errors.clone();
+        let mut abort_guard = StreamAbortGuard::new(
+            state.clone(),
+            model.clone(),
+            thread_id.clone(),
+            requested_model.clone(),
+            failed_models.clone(),
+            request_errors.clone(),
+            label.clone(),
+            started_at,
+        );
         let mut stream_failure = None;
         for chunk in inspected.chunks.drain(..) {
             yield Ok::<Bytes, Infallible>(chunk);
@@ -1803,17 +1823,6 @@ fn stream_response(
             }
         }
         if let Some(failure) = stream_failure {
-            state
-                .circuit_breakers
-                .record_failure(
-                    &model,
-                    &target,
-                    &cfg,
-                    &state.stats,
-                    failure.clone(),
-                    now_ms().saturating_sub(target_started),
-                )
-                .await;
             let mut stream_failed_models = failed_models.clone();
             stream_failed_models.push(label.clone());
             let err_item = AttemptError {
@@ -1831,6 +1840,7 @@ fn stream_response(
                 thread.failed_models = stream_failed_models.clone();
             });
             state.stats.chain_failure(&model.public_name).await;
+            abort_guard.disarm();
             log_request(
                 &state.stats,
                 &model,
@@ -1845,16 +1855,6 @@ fn stream_response(
             .await;
         } else {
             state
-                .circuit_breakers
-                .record_success(
-                    &model,
-                    &target,
-                    &cfg,
-                    &state.stats,
-                    now_ms().saturating_sub(target_started),
-                )
-                .await;
-            state
                 .stats
                 .chain_success(&model.public_name, failover)
                 .await;
@@ -1863,6 +1863,7 @@ fn stream_response(
                 thread.status = format!("已完成来自 {} 的流式响应", label);
                 thread.failed_models = failed_models.clone();
             });
+            abort_guard.disarm();
             log_request(
                 &state.stats,
                 &model,
@@ -1888,6 +1889,92 @@ fn stream_response(
         true,
     );
     response
+}
+
+struct StreamAbortGuard {
+    state: AppState,
+    model: ModelConfig,
+    thread_id: String,
+    requested_model: String,
+    failed_models: Vec<String>,
+    request_errors: Vec<AttemptError>,
+    label: String,
+    started_at: u64,
+    disarmed: bool,
+}
+
+impl StreamAbortGuard {
+    fn new(
+        state: AppState,
+        model: ModelConfig,
+        thread_id: String,
+        requested_model: String,
+        failed_models: Vec<String>,
+        request_errors: Vec<AttemptError>,
+        label: String,
+        started_at: u64,
+    ) -> Self {
+        Self {
+            state,
+            model,
+            thread_id,
+            requested_model,
+            failed_models,
+            request_errors,
+            label,
+            started_at,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for StreamAbortGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let state = self.state.clone();
+        let model = self.model.clone();
+        let thread_id = self.thread_id.clone();
+        let requested_model = self.requested_model.clone();
+        let mut failed_models = self.failed_models.clone();
+        let mut request_errors = self.request_errors.clone();
+        let label = self.label.clone();
+        let started_at = self.started_at;
+        tokio::spawn(async move {
+            let message = "客户端在流式响应完成前断开连接".to_string();
+            let err_item = AttemptError {
+                target: label.clone(),
+                message: message.clone(),
+                ..AttemptError::default()
+            };
+            failed_models.push(label.clone());
+            request_errors.push(err_item.clone());
+            state.proxy_runtime.append_error(&thread_id, err_item);
+            state.proxy_runtime.update_thread(&thread_id, |thread| {
+                thread.phase = "failed".to_string();
+                thread.status = message.clone();
+                thread.failed_models = failed_models.clone();
+            });
+            state.stats.chain_failure(&model.public_name).await;
+            log_request(
+                &state.stats,
+                &model,
+                &requested_model,
+                &failed_models,
+                &request_errors,
+                "",
+                "failed",
+                started_at,
+                &message,
+            )
+            .await;
+        });
+    }
 }
 
 pub fn classify_upstream_failure(

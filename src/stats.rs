@@ -8,7 +8,10 @@ use std::{
     collections::{BTreeMap, HashSet},
     io::ErrorKind,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tokio::{fs, sync::RwLock};
 use uuid::Uuid;
@@ -112,6 +115,7 @@ pub struct StatsStore {
     logs_path: Arc<PathBuf>,
     model_stats_path: Arc<PathBuf>,
     log_settings: Arc<RwLock<LogSettingsConfig>>,
+    save_queued: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -193,6 +197,7 @@ impl StatsStore {
             logs_path: Arc::new(logs_path),
             model_stats_path: Arc::new(model_stats_path),
             log_settings: Arc::new(RwLock::new(log_settings)),
+            save_queued: Arc::new(AtomicBool::new(false)),
         };
         store.save_now().await?;
         if legacy_stats.is_some() {
@@ -241,6 +246,24 @@ impl StatsStore {
                     tracing::warn!(error = %err, "cannot save stats");
                 }
             }
+        });
+    }
+
+    fn schedule_save_soon(&self) {
+        if self
+            .save_queued
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let store = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Err(err) = store.save_now().await {
+                tracing::warn!(error = %err, "cannot save stats");
+            }
+            store.save_queued.store(false, Ordering::Release);
         });
     }
 
@@ -366,6 +389,7 @@ impl StatsStore {
             push_request_log(&mut stats.logs, entry, &settings);
         })
         .await;
+        self.schedule_save_soon();
     }
 
     pub async fn clear_logs(&self) -> Result<()> {
