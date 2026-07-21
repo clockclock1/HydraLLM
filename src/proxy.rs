@@ -1792,6 +1792,8 @@ fn stream_response(
     let body_stream = async_stream::stream! {
         let slot_guard = slot;
         let mut request_errors = failed_errors.clone();
+        let mut completion = StreamCompletionDetector::default();
+        let mut completed = false;
         let mut abort_guard = StreamAbortGuard::new(
             state.clone(),
             model.clone(),
@@ -1804,78 +1806,111 @@ fn stream_response(
         );
         let mut stream_failure = None;
         for chunk in inspected.chunks.drain(..) {
+            if !completed && completion.observe(&chunk) {
+                completed = true;
+                abort_guard.disarm();
+                complete_stream_success(
+                    &state,
+                    &model,
+                    &thread_id,
+                    &requested_model,
+                    &failed_models,
+                    &request_errors,
+                    &label,
+                    started_at,
+                    failover,
+                )
+                .await;
+            }
             yield Ok::<Bytes, Infallible>(chunk);
+            if completed {
+                break;
+            }
         }
-        if let Some(mut stream) = inspected.stream {
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(chunk) => {
-                        yield Ok::<Bytes, Infallible>(chunk);
-                    }
-                    Err(err) => {
-                        stream_failure = Some(FailureInfo {
-                            message: err.to_string(),
-                            ..FailureInfo::default()
-                        });
-                        break;
+        if !completed {
+            if let Some(mut stream) = inspected.stream {
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(chunk) => {
+                            if completion.observe(&chunk) {
+                                completed = true;
+                                abort_guard.disarm();
+                                complete_stream_success(
+                                    &state,
+                                    &model,
+                                    &thread_id,
+                                    &requested_model,
+                                    &failed_models,
+                                    &request_errors,
+                                    &label,
+                                    started_at,
+                                    failover,
+                                )
+                                .await;
+                            }
+                            yield Ok::<Bytes, Infallible>(chunk);
+                            if completed {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            stream_failure = Some(FailureInfo {
+                                message: err.to_string(),
+                                ..FailureInfo::default()
+                            });
+                            break;
+                        }
                     }
                 }
             }
         }
-        if let Some(failure) = stream_failure {
-            let mut stream_failed_models = failed_models.clone();
-            stream_failed_models.push(label.clone());
-            let err_item = AttemptError {
-                target: label.clone(),
-                status: Some(failure.status),
-                message: failure.message.clone(),
-                detail: Some(failure.body.clone()),
-                ..AttemptError::default()
-            };
-            state.proxy_runtime.append_error(&thread_id, err_item.clone());
-            request_errors.push(err_item);
-            state.proxy_runtime.update_thread(&thread_id, |thread| {
-                thread.phase = "failed".to_string();
-                thread.status = format!("流式响应中检测到失败：{}", failure.message);
-                thread.failed_models = stream_failed_models.clone();
-            });
-            state.stats.chain_failure(&model.public_name).await;
-            abort_guard.disarm();
-            log_request(
-                &state.stats,
-                &model,
-                &requested_model,
-                &stream_failed_models,
-                &request_errors,
-                "",
-                "failed",
-                started_at,
-                &failure.message,
-            )
-            .await;
-        } else {
-            state
-                .stats
-                .chain_success(&model.public_name, failover)
+        if !completed {
+            if let Some(failure) = stream_failure {
+                let mut stream_failed_models = failed_models.clone();
+                stream_failed_models.push(label.clone());
+                let err_item = AttemptError {
+                    target: label.clone(),
+                    status: Some(failure.status),
+                    message: failure.message.clone(),
+                    detail: Some(failure.body.clone()),
+                    ..AttemptError::default()
+                };
+                state.proxy_runtime.append_error(&thread_id, err_item.clone());
+                request_errors.push(err_item);
+                state.proxy_runtime.update_thread(&thread_id, |thread| {
+                    thread.phase = "failed".to_string();
+                    thread.status = format!("流式响应中检测到失败：{}", failure.message);
+                    thread.failed_models = stream_failed_models.clone();
+                });
+                state.stats.chain_failure(&model.public_name).await;
+                abort_guard.disarm();
+                log_request(
+                    &state.stats,
+                    &model,
+                    &requested_model,
+                    &stream_failed_models,
+                    &request_errors,
+                    "",
+                    "failed",
+                    started_at,
+                    &failure.message,
+                )
                 .await;
-            state.proxy_runtime.update_thread(&thread_id, |thread| {
-                thread.phase = "completed".to_string();
-                thread.status = format!("已完成来自 {} 的流式响应", label);
-                thread.failed_models = failed_models.clone();
-            });
-            abort_guard.disarm();
-            log_request(
-                &state.stats,
-                &model,
-                &requested_model,
-                &failed_models,
-                &request_errors,
-                &label,
-                "success",
-                started_at,
-                "",
-            )
-            .await;
+            } else {
+                abort_guard.disarm();
+                complete_stream_success(
+                    &state,
+                    &model,
+                    &thread_id,
+                    &requested_model,
+                    &failed_models,
+                    &request_errors,
+                    &label,
+                    started_at,
+                    failover,
+                )
+                .await;
+            }
         }
         drop(slot_guard);
     };
@@ -1889,6 +1924,72 @@ fn stream_response(
         true,
     );
     response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_stream_success(
+    state: &AppState,
+    model: &ModelConfig,
+    thread_id: &str,
+    requested_model: &str,
+    failed_models: &[String],
+    request_errors: &[AttemptError],
+    label: &str,
+    started_at: u64,
+    failover: bool,
+) {
+    state
+        .stats
+        .chain_success(&model.public_name, failover)
+        .await;
+    state.proxy_runtime.update_thread(thread_id, |thread| {
+        thread.phase = "completed".to_string();
+        thread.status = format!("已完成来自 {} 的流式响应", label);
+        thread.failed_models = failed_models.to_vec();
+    });
+    log_request(
+        &state.stats,
+        model,
+        requested_model,
+        failed_models,
+        request_errors,
+        label,
+        "success",
+        started_at,
+        "",
+    )
+    .await;
+}
+
+#[derive(Default)]
+struct StreamCompletionDetector {
+    tail: String,
+}
+
+impl StreamCompletionDetector {
+    fn observe(&mut self, chunk: &Bytes) -> bool {
+        self.tail.push_str(&String::from_utf8_lossy(chunk));
+        if self.tail.len() > 4096 {
+            let keep_from = self
+                .tail
+                .char_indices()
+                .rev()
+                .nth(4095)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            self.tail = self.tail[keep_from..].to_string();
+        }
+        stream_text_has_done_marker(&self.tail)
+    }
+}
+
+fn stream_text_has_done_marker(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("data:")
+            .map(|data| data.trim() == "[DONE]")
+            .unwrap_or(false)
+    })
 }
 
 struct StreamAbortGuard {
@@ -2545,5 +2646,23 @@ mod tests {
         assert!(entries[0].error.contains("quota"));
         assert_eq!(entries[1].model, "model-b");
         assert!(entries[1].error.contains("timeout"));
+    }
+
+    #[test]
+    fn stream_completion_detector_finds_done_marker() {
+        let mut detector = StreamCompletionDetector::default();
+
+        assert!(!detector.observe(&Bytes::from_static(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        )));
+        assert!(detector.observe(&Bytes::from_static(b"data: [DONE]\n\n")));
+    }
+
+    #[test]
+    fn stream_completion_detector_handles_split_done_marker() {
+        let mut detector = StreamCompletionDetector::default();
+
+        assert!(!detector.observe(&Bytes::from_static(b"data: [DO")));
+        assert!(detector.observe(&Bytes::from_static(b"NE]\n\n")));
     }
 }
