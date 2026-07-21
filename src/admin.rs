@@ -1,5 +1,5 @@
 use crate::{
-    config::{save_config, Config, ModelConfig},
+    config::{normalize_log_settings, save_config, Config, LogSettingsConfig, ModelConfig},
     model_source::{configured_providers, fetch_model_source, filter_source_models},
     AppState,
 };
@@ -61,11 +61,72 @@ pub async fn post_config(
     match save_config(&state.config_path, &next_config).await {
         Ok(normalized) => {
             *state.config.write().await = normalized.clone();
+            if let Err(err) = state
+                .stats
+                .apply_log_settings(normalized.log_settings.clone())
+                .await
+            {
+                tracing::warn!(error = %err, "cannot apply log settings");
+            }
             let mut runtime_models = normalized.models.clone();
             runtime_models.extend(state.model_source.cached_models().await);
             cleanup_runtime_state(&state, &runtime_models).await;
             admin_json(json!({ "ok": true, "config": normalized }))
         }
+        Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
+    }
+}
+
+pub async fn get_log_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+    let stats = state.stats.snapshot().await;
+    admin_json(json!({
+        "ok": true,
+        "settings": state.stats.log_settings().await,
+        "logCount": stats.logs.len(),
+        "logsPath": state.stats.logs_path().to_string_lossy(),
+        "modelStatsPath": state.stats.model_stats_path().to_string_lossy(),
+    }))
+}
+
+pub async fn post_log_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LogSettingsConfig>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+    let settings = normalize_log_settings(body);
+    let mut next_config = cfg.clone();
+    next_config.log_settings = settings.clone();
+    match save_config(&state.config_path, &next_config).await {
+        Ok(normalized) => {
+            *state.config.write().await = normalized.clone();
+            match state
+                .stats
+                .apply_log_settings(normalized.log_settings.clone())
+                .await
+            {
+                Ok(applied) => admin_json(json!({ "ok": true, "settings": applied })),
+                Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
+            }
+        }
+        Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
+    }
+}
+
+pub async fn clear_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+    match state.stats.clear_logs().await {
+        Ok(()) => admin_json(json!({ "ok": true, "logCount": 0 })),
         Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
     }
 }
@@ -133,6 +194,9 @@ pub async fn get_page_stats(
             let stats = state.stats.snapshot().await;
             json!({
                 "logs": stats.logs,
+                "logSettings": state.stats.log_settings().await,
+                "logsPath": state.stats.logs_path().to_string_lossy(),
+                "modelStatsPath": state.stats.model_stats_path().to_string_lossy(),
             })
         }
         _ => json!({}),

@@ -2222,10 +2222,25 @@ fn insert_common_proxy_headers(
 
 fn format_attempt_error(item: &AttemptError) -> String {
     let suffix = item.attempt.map(|n| format!("#{}", n)).unwrap_or_default();
-    let value = item
-        .status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| item.message.clone());
+    let mut value = String::new();
+    if let Some(status) = item.status {
+        value.push_str(&format!("HTTP {}", status));
+    }
+    if !item.message.is_empty() {
+        if !value.is_empty() {
+            value.push_str(" - ");
+        }
+        value.push_str(&item.message);
+    }
+    if let Some(detail) = item.detail.as_deref().filter(|detail| !detail.is_empty()) {
+        if !value.is_empty() {
+            value.push_str("\n");
+        }
+        value.push_str(detail);
+    }
+    if value.is_empty() {
+        value.push_str("unknown error");
+    }
     format!(
         "{}{}: {}",
         if item.target.is_empty() {

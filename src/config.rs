@@ -11,6 +11,7 @@ pub struct Config {
     pub proxy_keys: Vec<ProxyKey>,
     pub failover_status_codes: Vec<u16>,
     pub request_timeout_ms: u64,
+    pub log_settings: LogSettingsConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub model_source: ModelSourceConfig,
     pub providers: Vec<ProviderConfig>,
@@ -31,6 +32,14 @@ pub struct CircuitBreakerConfig {
     pub failure_threshold: u32,
     pub cooldown_minutes: u64,
     pub immediate_cooldown_status_codes: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LogSettingsConfig {
+    pub max_entries: usize,
+    pub max_bytes: u64,
+    pub max_error_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +115,7 @@ impl Default for Config {
             }],
             failover_status_codes: vec![401, 403, 408, 409, 429, 500, 502, 503, 504],
             request_timeout_ms: 120_000,
+            log_settings: LogSettingsConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             model_source: ModelSourceConfig::default(),
             providers: Vec::new(),
@@ -154,6 +164,16 @@ impl Default for CircuitBreakerConfig {
             failure_threshold: 3,
             cooldown_minutes: 10,
             immediate_cooldown_status_codes: vec![429],
+        }
+    }
+}
+
+impl Default for LogSettingsConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: 500,
+            max_bytes: 10 * 1024 * 1024,
+            max_error_chars: 65_536,
         }
     }
 }
@@ -251,6 +271,7 @@ pub fn normalize_config(mut cfg: Config) -> Config {
     if cfg.request_timeout_ms == 0 {
         cfg.request_timeout_ms = defaults.request_timeout_ms;
     }
+    cfg.log_settings = normalize_log_settings(cfg.log_settings);
     cfg.circuit_breaker = normalize_circuit(cfg.circuit_breaker);
     cfg.model_source = normalize_model_source(cfg.model_source);
     cfg.providers = normalize_providers(cfg.providers);
@@ -299,6 +320,23 @@ pub fn normalize_circuit(mut breaker: CircuitBreakerConfig) -> CircuitBreakerCon
         breaker.immediate_cooldown_status_codes = vec![429];
     }
     breaker
+}
+
+pub fn normalize_log_settings(mut settings: LogSettingsConfig) -> LogSettingsConfig {
+    let defaults = LogSettingsConfig::default();
+    if settings.max_entries == 0 {
+        settings.max_entries = defaults.max_entries;
+    }
+    if settings.max_bytes == 0 {
+        settings.max_bytes = defaults.max_bytes;
+    }
+    if settings.max_error_chars == 0 {
+        settings.max_error_chars = defaults.max_error_chars;
+    }
+    settings.max_entries = settings.max_entries.clamp(1, 100_000);
+    settings.max_bytes = settings.max_bytes.clamp(64 * 1024, 1024 * 1024 * 1024);
+    settings.max_error_chars = settings.max_error_chars.clamp(256, 1024 * 1024);
+    settings
 }
 
 pub fn normalize_model_source(mut source: ModelSourceConfig) -> ModelSourceConfig {

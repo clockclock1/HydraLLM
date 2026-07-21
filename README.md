@@ -20,7 +20,7 @@ HydraLLM 是一个 OpenAI 兼容的大模型故障转移代理，内置可视化
 - 被动故障检测：真实代理请求触发转移和熔断，管理界面健康检查只更新在线状态与延迟。
 - 代理请求不再限制每个模型的并发线程数；请求或流结束后实时线程记录立即释放。
 - 统计与日志：总请求、成功、失败、转移次数，按模型和 target 的细粒度统计，请求日志，实时线程，进程内存占用。
-- 配置持久化：`data/config.json` 和 `data/stats.json` 使用 tmp + rename 原子写入。
+- 配置持久化：`data/config.json` 原子写入；请求日志和模型统计分别保存到 CSV，旧 `data/stats.json` 会在启动时自动迁移后删除。
 - 管理界面以内嵌多文件前端形式随服务二进制发布，无需额外前端运行时。
 - CORS、请求超时、body limit、优雅关闭和结构化日志。
 
@@ -58,7 +58,9 @@ cargo run
 - Admin Token：`admin`
 - 代理 Key：`sk-local-test`
 - 配置文件：`data/config.json`
-- 统计文件：`data/stats.json`
+- 请求日志：`data/request-logs.csv`
+- 模型统计：`data/model-stats.csv`
+- 旧统计迁移文件：`data/stats.json`（启动时自动合并到 CSV 后删除）
 
 首次运行时，如果 `data/config.json` 不存在，程序会自动创建默认配置。
 
@@ -69,7 +71,9 @@ HOST=0.0.0.0
 PORT=8787
 DATA_DIR=./data
 CONFIG_PATH=./data/config.json
-STATS_PATH=./data/stats.json
+STATS_PATH=./data/stats.json  # legacy migration only
+REQUEST_LOGS_PATH=./data/request-logs.csv
+MODEL_STATS_PATH=./data/model-stats.csv
 BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
 RUST_LOG=hydrallm=info,tower_http=info
@@ -276,7 +280,7 @@ HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI.
 - Passive failure detection: real proxy requests trigger failover and circuit breaking; UI health checks only update observed provider status and latency.
 - Proxy requests are no longer capped by per-model thread slots. Active thread records are released immediately when the request or stream finishes.
 - Stats and logs: total requests, successes, failures, failovers, per-model and per-target stats, request logs, live threads, and process memory.
-- Config persistence: `data/config.json` and `data/stats.json` are saved atomically with tmp + rename.
+- Config persistence: `data/config.json` is saved atomically; request logs and model stats are stored as CSV files, and legacy `data/stats.json` is migrated on startup then removed.
 - Embedded multi-file admin UI served from the service binary. No extra frontend runtime is required.
 - CORS, request timeout, body limit, graceful shutdown, and structured logging.
 
@@ -314,7 +318,9 @@ Defaults:
 - Admin Token: `admin`
 - Proxy Key: `sk-local-test`
 - Config: `data/config.json`
-- Stats: `data/stats.json`
+- Request logs: `data/request-logs.csv`
+- Model stats: `data/model-stats.csv`
+- Legacy stats migration file: `data/stats.json` (merged into CSV on startup, then removed)
 
 On first run, the server creates `data/config.json` automatically if it does not exist.
 
@@ -325,7 +331,9 @@ HOST=0.0.0.0
 PORT=8787
 DATA_DIR=./data
 CONFIG_PATH=./data/config.json
-STATS_PATH=./data/stats.json
+STATS_PATH=./data/stats.json  # legacy migration only
+REQUEST_LOGS_PATH=./data/request-logs.csv
+MODEL_STATS_PATH=./data/model-stats.csv
 BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
 RUST_LOG=hydrallm=info,tower_http=info

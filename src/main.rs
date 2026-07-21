@@ -37,6 +37,10 @@ struct Cli {
     config_path: Option<PathBuf>,
     #[arg(long, env = "STATS_PATH")]
     stats_path: Option<PathBuf>,
+    #[arg(long, env = "REQUEST_LOGS_PATH")]
+    request_logs_path: Option<PathBuf>,
+    #[arg(long, env = "MODEL_STATS_PATH")]
+    model_stats_path: Option<PathBuf>,
     #[arg(long, env = "BODY_LIMIT_MB", default_value_t = 50)]
     body_limit_mb: usize,
 }
@@ -77,6 +81,12 @@ async fn main() -> anyhow::Result<()> {
     let stats_path = cli
         .stats_path
         .unwrap_or_else(|| data_dir.join("stats.json"));
+    let request_logs_path = cli
+        .request_logs_path
+        .unwrap_or_else(|| data_dir.join("request-logs.csv"));
+    let model_stats_path = cli
+        .model_stats_path
+        .unwrap_or_else(|| data_dir.join("model-stats.csv"));
 
     let cfg = load_config(&config_path).await?;
     let client = Client::builder()
@@ -89,7 +99,13 @@ async fn main() -> anyhow::Result<()> {
         .gzip(true)
         .use_rustls_tls()
         .build()?;
-    let stats = stats::StatsStore::load(stats_path.clone()).await?;
+    let stats = stats::StatsStore::load(
+        stats_path.clone(),
+        request_logs_path.clone(),
+        model_stats_path.clone(),
+        cfg.log_settings.clone(),
+    )
+    .await?;
     stats.spawn_periodic_save();
     let config_state = Arc::new(RwLock::new(cfg));
     let provider_health = model_source::ProviderHealthService::new(client.clone());
@@ -133,6 +149,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/stats", get(admin::get_stats))
         .route("/api/stats/page/{page}", get(admin::get_page_stats))
+        .route(
+            "/api/log-settings",
+            get(admin::get_log_settings).post(admin::post_log_settings),
+        )
+        .route("/api/logs/clear", post(admin::clear_logs))
         .route("/api/providers/health", post(admin::providers_health))
         .route("/api/model-tests/run", post(admin::model_tests_run))
         .route(

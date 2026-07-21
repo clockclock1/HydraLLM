@@ -1,11 +1,12 @@
 use crate::config::{
-    channel_label, channel_model_label, model_circuit, target_key, Config, ModelConfig,
-    TargetConfig,
+    channel_label, channel_model_label, model_circuit, normalize_log_settings, target_key, Config,
+    LogSettingsConfig, ModelConfig, TargetConfig,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
+    io::ErrorKind,
     path::PathBuf,
     sync::Arc,
 };
@@ -13,6 +14,10 @@ use tokio::{fs, sync::RwLock};
 use uuid::Uuid;
 
 const REQUEST_LOG_LIMIT: usize = 500;
+const REQUEST_LOGS_CSV_HEADER: &str =
+    "id,timestamp,chainName,originalModel,failedModels,finalModel,status,latency,error\n";
+const MODEL_STATS_CSV_HEADER: &str =
+    "channel,baseUrl,model,requests,successes,failures,lastStatus,lastError,lastLatencyMs,updatedAt\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -96,6 +101,9 @@ pub struct LogEntry {
 pub struct StatsStore {
     inner: Arc<RwLock<Stats>>,
     path: Arc<PathBuf>,
+    logs_path: Arc<PathBuf>,
+    model_stats_path: Arc<PathBuf>,
+    log_settings: Arc<RwLock<LogSettingsConfig>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,21 +146,49 @@ impl Default for LogEntry {
 }
 
 impl StatsStore {
-    pub async fn load(path: PathBuf) -> Result<Self> {
+    pub async fn load(
+        path: PathBuf,
+        logs_path: PathBuf,
+        model_stats_path: PathBuf,
+        log_settings: LogSettingsConfig,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        let stats = match fs::read_to_string(&path).await {
-            Ok(text) => serde_json::from_str::<Stats>(&text)
-                .unwrap_or_default()
-                .normalize(),
-            Err(_) => Stats::default(),
+        let legacy_stats = match fs::read_to_string(&path).await {
+            Ok(text) => Some(
+                serde_json::from_str::<Stats>(&text)
+                    .unwrap_or_default()
+                    .normalize(),
+            ),
+            Err(err) if err.kind() == ErrorKind::NotFound => None,
+            Err(err) => return Err(err.into()),
         };
+        let mut stats = legacy_stats.clone().unwrap_or_default();
+        if let Ok(logs) = load_request_logs_csv(&logs_path).await {
+            stats.logs = merge_logs(logs, legacy_stats.as_ref().map(|item| item.logs.clone()));
+        }
+        if let Ok(channel_models) = load_model_stats_csv(&model_stats_path).await {
+            stats.channel_models = merge_channel_models(
+                channel_models,
+                legacy_stats
+                    .as_ref()
+                    .map(|item| item.channel_models.clone()),
+            );
+        }
+        let log_settings = normalize_log_settings(log_settings);
+        apply_log_limits(&mut stats.logs, &log_settings);
         let store = Self {
             inner: Arc::new(RwLock::new(stats)),
             path: Arc::new(path),
+            logs_path: Arc::new(logs_path),
+            model_stats_path: Arc::new(model_stats_path),
+            log_settings: Arc::new(RwLock::new(log_settings)),
         };
         store.save_now().await?;
+        if legacy_stats.is_some() {
+            store.remove_legacy_stats_json().await?;
+        }
         Ok(store)
     }
 
@@ -164,27 +200,26 @@ impl StatsStore {
     where
         F: FnOnce(&mut Stats),
     {
+        let settings = self.log_settings.read().await.clone();
         let mut stats = self.inner.write().await;
         f(&mut stats);
-        trim_logs(&mut stats.logs);
+        apply_log_limits(&mut stats.logs, &settings);
     }
 
     pub async fn save_now(&self) -> Result<()> {
         let snapshot = self.snapshot().await;
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-        let tmp = self.path.with_file_name(format!(
-            "{}.{}.tmp",
-            self.path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("stats.json"),
-            Uuid::new_v4()
-        ));
-        fs::write(&tmp, serde_json::to_vec_pretty(&snapshot)?).await?;
-        fs::rename(&tmp, &*self.path).await?;
+        save_request_logs_csv(&self.logs_path, &snapshot.logs).await?;
+        save_model_stats_csv(&self.model_stats_path, &snapshot.channel_models).await?;
+        self.remove_legacy_stats_json().await?;
         Ok(())
+    }
+
+    async fn remove_legacy_stats_json(&self) -> Result<()> {
+        match fs::remove_file(&*self.path).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     pub fn spawn_periodic_save(&self) {
@@ -313,11 +348,50 @@ impl StatsStore {
         if entry.timestamp == 0 {
             entry.timestamp = now_ms();
         }
-        entry.error = trim_persisted_string(&entry.error);
+        let settings = self.log_settings.read().await.clone();
+        entry.error = trim_string_chars(&entry.error, settings.max_error_chars);
         self.mutate(|stats| {
-            push_request_log(&mut stats.logs, entry);
+            push_request_log(&mut stats.logs, entry, &settings);
         })
         .await;
+    }
+
+    pub async fn clear_logs(&self) -> Result<()> {
+        self.mutate(|stats| {
+            stats.logs.clear();
+            stats.logs.shrink_to_fit();
+        })
+        .await;
+        self.save_now().await
+    }
+
+    pub async fn apply_log_settings(
+        &self,
+        settings: LogSettingsConfig,
+    ) -> Result<LogSettingsConfig> {
+        let normalized = normalize_log_settings(settings);
+        {
+            let mut guard = self.log_settings.write().await;
+            *guard = normalized.clone();
+        }
+        self.mutate(|stats| {
+            apply_log_limits(&mut stats.logs, &normalized);
+        })
+        .await;
+        self.save_now().await?;
+        Ok(normalized)
+    }
+
+    pub async fn log_settings(&self) -> LogSettingsConfig {
+        self.log_settings.read().await.clone()
+    }
+
+    pub fn logs_path(&self) -> PathBuf {
+        (*self.logs_path).clone()
+    }
+
+    pub fn model_stats_path(&self) -> PathBuf {
+        (*self.model_stats_path).clone()
     }
 
     pub async fn avg_latency(&self, model: &ModelConfig, target: &TargetConfig) -> u64 {
@@ -374,10 +448,6 @@ impl StatsStore {
 
 impl Stats {
     fn normalize(mut self) -> Self {
-        self.requests = self.requests.max(0);
-        self.successes = self.successes.max(0);
-        self.failures = self.failures.max(0);
-        self.failovers = self.failovers.max(0);
         trim_logs(&mut self.logs);
         for target in self.targets.values_mut() {
             target.last_error = trim_persisted_string(&target.last_error);
@@ -461,18 +531,361 @@ fn trim_logs(logs: &mut Vec<LogEntry>) {
     }
 }
 
-fn push_request_log(logs: &mut Vec<LogEntry>, entry: LogEntry) {
-    if logs.len() >= REQUEST_LOG_LIMIT {
-        logs.truncate(REQUEST_LOG_LIMIT - 1);
-    }
-    logs.insert(0, entry);
-    if logs.capacity() > REQUEST_LOG_LIMIT + 100 {
+fn apply_log_limits(logs: &mut Vec<LogEntry>, settings: &LogSettingsConfig) {
+    logs.truncate(settings.max_entries);
+    trim_logs_to_csv_size(logs, settings.max_bytes);
+    if logs.capacity() > settings.max_entries + 100 {
         logs.shrink_to_fit();
     }
 }
 
+fn push_request_log(logs: &mut Vec<LogEntry>, entry: LogEntry, settings: &LogSettingsConfig) {
+    if logs.len() >= settings.max_entries {
+        logs.truncate(settings.max_entries.saturating_sub(1));
+    }
+    logs.insert(0, entry);
+    apply_log_limits(logs, settings);
+}
+
 fn trim_persisted_string(value: &str) -> String {
     value.chars().take(1500).collect()
+}
+
+#[cfg(test)]
+fn stats_json_payload(stats: &Stats) -> serde_json::Value {
+    let mut value = serde_json::to_value(stats).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("logs");
+        obj.remove("channelModels");
+    }
+    value
+}
+
+fn merge_logs(mut csv_logs: Vec<LogEntry>, legacy_logs: Option<Vec<LogEntry>>) -> Vec<LogEntry> {
+    let mut seen = csv_logs
+        .iter()
+        .filter_map(|entry| {
+            if entry.id.is_empty() {
+                None
+            } else {
+                Some(entry.id.clone())
+            }
+        })
+        .collect::<HashSet<_>>();
+    if let Some(legacy_logs) = legacy_logs {
+        for entry in legacy_logs {
+            if !entry.id.is_empty() && !seen.insert(entry.id.clone()) {
+                continue;
+            }
+            csv_logs.push(entry);
+        }
+    }
+    csv_logs.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    csv_logs
+}
+
+fn merge_channel_models(
+    mut csv_channels: BTreeMap<String, ChannelModelStats>,
+    legacy_channels: Option<BTreeMap<String, ChannelModelStats>>,
+) -> BTreeMap<String, ChannelModelStats> {
+    let Some(legacy_channels) = legacy_channels else {
+        return csv_channels;
+    };
+    for (channel_name, legacy_channel) in legacy_channels {
+        let channel =
+            csv_channels
+                .entry(channel_name.clone())
+                .or_insert_with(|| ChannelModelStats {
+                    name: if legacy_channel.name.is_empty() {
+                        channel_name
+                    } else {
+                        legacy_channel.name.clone()
+                    },
+                    base_url: legacy_channel.base_url.clone(),
+                    ..ChannelModelStats::default()
+                });
+        if channel.name.is_empty() {
+            channel.name = legacy_channel.name;
+        }
+        if channel.base_url.is_empty() {
+            channel.base_url = legacy_channel.base_url;
+        }
+        channel.requests = channel.requests.max(legacy_channel.requests);
+        channel.successes = channel.successes.max(legacy_channel.successes);
+        channel.failures = channel.failures.max(legacy_channel.failures);
+        for (model_name, legacy_model) in legacy_channel.models {
+            match channel.models.get_mut(&model_name) {
+                Some(model) => merge_model_stat(model, legacy_model),
+                None => {
+                    channel.models.insert(model_name, legacy_model);
+                }
+            }
+        }
+    }
+    for channel in csv_channels.values_mut() {
+        recompute_channel_totals(channel);
+    }
+    csv_channels
+}
+
+fn recompute_channel_totals(channel: &mut ChannelModelStats) {
+    if channel.models.is_empty() {
+        return;
+    }
+    channel.requests = channel.models.values().map(|item| item.requests).sum();
+    channel.successes = channel.models.values().map(|item| item.successes).sum();
+    channel.failures = channel.models.values().map(|item| item.failures).sum();
+}
+
+fn merge_model_stat(model: &mut ChannelModelItemStats, legacy: ChannelModelItemStats) {
+    model.requests = model.requests.max(legacy.requests);
+    model.successes = model.successes.max(legacy.successes);
+    model.failures = model.failures.max(legacy.failures);
+    if legacy.updated_at > model.updated_at {
+        model.last_status = legacy.last_status;
+        model.last_error = legacy.last_error;
+        model.last_latency_ms = legacy.last_latency_ms;
+        model.updated_at = legacy.updated_at;
+    }
+    if model.name.is_empty() {
+        model.name = legacy.name;
+    }
+}
+
+fn trim_string_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn trim_logs_to_csv_size(logs: &mut Vec<LogEntry>, max_bytes: u64) {
+    let mut total = logs_csv_size(logs);
+    while total as u64 > max_bytes && !logs.is_empty() {
+        if let Some(last) = logs.last() {
+            total = total.saturating_sub(log_csv_row_size(last));
+        }
+        logs.pop();
+    }
+}
+
+fn logs_csv_size(logs: &[LogEntry]) -> usize {
+    REQUEST_LOGS_CSV_HEADER.len() + logs.iter().map(log_csv_row_size).sum::<usize>()
+}
+
+fn log_csv_row_size(log: &LogEntry) -> usize {
+    let fields = log_to_csv_fields(log);
+    fields
+        .iter()
+        .map(|field| csv_field_size(field))
+        .sum::<usize>()
+        + fields.len()
+}
+
+async fn save_request_logs_csv(path: &PathBuf, logs: &[LogEntry]) -> Result<()> {
+    let mut text = String::with_capacity(logs_csv_size(logs));
+    text.push_str(REQUEST_LOGS_CSV_HEADER);
+    for log in logs {
+        push_csv_row(&mut text, &log_to_csv_fields(log));
+    }
+    atomic_write(path, text.into_bytes()).await
+}
+
+async fn save_model_stats_csv(
+    path: &PathBuf,
+    channel_models: &BTreeMap<String, ChannelModelStats>,
+) -> Result<()> {
+    let mut text = String::from(MODEL_STATS_CSV_HEADER);
+    for (channel_name, channel) in channel_models {
+        for (model_name, model) in &channel.models {
+            push_csv_row(
+                &mut text,
+                &[
+                    channel_name.clone(),
+                    channel.base_url.clone(),
+                    model_name.clone(),
+                    model.requests.to_string(),
+                    model.successes.to_string(),
+                    model.failures.to_string(),
+                    model.last_status.to_string(),
+                    model.last_error.clone(),
+                    model.last_latency_ms.to_string(),
+                    model.updated_at.to_string(),
+                ],
+            );
+        }
+    }
+    atomic_write(path, text.into_bytes()).await
+}
+
+async fn load_request_logs_csv(path: &PathBuf) -> Result<Vec<LogEntry>> {
+    let text = fs::read_to_string(path).await?;
+    let rows = parse_csv(&text);
+    Ok(rows
+        .into_iter()
+        .skip(1)
+        .filter(|row| row.len() >= 9)
+        .map(|row| LogEntry {
+            id: row[0].clone(),
+            timestamp: row[1].parse().unwrap_or(0),
+            chain_name: row[2].clone(),
+            original_model: row[3].clone(),
+            failed_models: serde_json::from_str(&row[4]).unwrap_or_default(),
+            final_model: row[5].clone(),
+            status: row[6].clone(),
+            latency: row[7].parse().unwrap_or(0),
+            error: row[8].clone(),
+        })
+        .collect())
+}
+
+async fn load_model_stats_csv(path: &PathBuf) -> Result<BTreeMap<String, ChannelModelStats>> {
+    let text = fs::read_to_string(path).await?;
+    let rows = parse_csv(&text);
+    let mut channels = BTreeMap::new();
+    for row in rows.into_iter().skip(1).filter(|row| row.len() >= 10) {
+        let channel_name = row[0].clone();
+        let base_url = row[1].clone();
+        let model_name = row[2].clone();
+        let channel = channels
+            .entry(channel_name.clone())
+            .or_insert_with(|| ChannelModelStats {
+                name: channel_name,
+                base_url: base_url.clone(),
+                ..ChannelModelStats::default()
+            });
+        if channel.base_url.is_empty() {
+            channel.base_url = base_url;
+        }
+        let requests = row[3].parse().unwrap_or(0);
+        let successes = row[4].parse().unwrap_or(0);
+        let failures = row[5].parse().unwrap_or(0);
+        channel.requests = channel.requests.saturating_add(requests);
+        channel.successes = channel.successes.saturating_add(successes);
+        channel.failures = channel.failures.saturating_add(failures);
+        channel.models.insert(
+            model_name.clone(),
+            ChannelModelItemStats {
+                name: model_name,
+                requests,
+                successes,
+                failures,
+                last_status: row[6].parse().unwrap_or(0),
+                last_error: row[7].clone(),
+                last_latency_ms: row[8].parse().unwrap_or(0),
+                updated_at: row[9].parse().unwrap_or(0),
+            },
+        );
+    }
+    Ok(channels)
+}
+
+async fn atomic_write(path: &PathBuf, bytes: Vec<u8>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("data.csv"),
+        Uuid::new_v4()
+    ));
+    fs::write(&tmp, bytes).await?;
+    fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+fn log_to_csv_fields(log: &LogEntry) -> Vec<String> {
+    vec![
+        log.id.clone(),
+        log.timestamp.to_string(),
+        log.chain_name.clone(),
+        log.original_model.clone(),
+        serde_json::to_string(&log.failed_models).unwrap_or_else(|_| "[]".to_string()),
+        log.final_model.clone(),
+        log.status.clone(),
+        log.latency.to_string(),
+        log.error.clone(),
+    ]
+}
+
+fn push_csv_row(out: &mut String, fields: &[String]) {
+    for (idx, field) in fields.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        push_csv_field(out, field);
+    }
+    out.push('\n');
+}
+
+fn push_csv_field(out: &mut String, value: &str) {
+    let must_quote =
+        value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r');
+    if !must_quote {
+        out.push_str(value);
+        return;
+    }
+    out.push('"');
+    for ch in value.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+}
+
+fn csv_field_size(value: &str) -> usize {
+    let mut size = 0;
+    let mut must_quote = false;
+    for ch in value.chars() {
+        if matches!(ch, ',' | '"' | '\n' | '\r') {
+            must_quote = true;
+        }
+        size += if ch == '"' { 2 } else { ch.len_utf8() };
+    }
+    if must_quote {
+        size + 2
+    } else {
+        size
+    }
+}
+
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = text.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                field.push('"');
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                row.push(std::mem::take(&mut field));
+            }
+            '\n' if !quoted => {
+                row.push(std::mem::take(&mut field));
+                if !row.is_empty() {
+                    rows.push(std::mem::take(&mut row));
+                }
+            }
+            '\r' if !quoted => {}
+            _ => field.push(ch),
+        }
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -487,11 +900,28 @@ mod tests {
         }
     }
 
+    fn model_stat(requests: u64, updated_at: u64, status: u16) -> ChannelModelItemStats {
+        ChannelModelItemStats {
+            name: "model-a".to_string(),
+            requests,
+            successes: requests.saturating_sub(1),
+            failures: 1,
+            last_status: status,
+            last_error: format!("status {status}"),
+            last_latency_ms: updated_at,
+            updated_at,
+        }
+    }
+
     #[test]
     fn push_request_log_replaces_oldest_when_full() {
         let mut logs = (0..REQUEST_LOG_LIMIT).map(log).collect::<Vec<_>>();
 
-        push_request_log(&mut logs, log(REQUEST_LOG_LIMIT));
+        push_request_log(
+            &mut logs,
+            log(REQUEST_LOG_LIMIT),
+            &LogSettingsConfig::default(),
+        );
 
         assert_eq!(logs.len(), REQUEST_LOG_LIMIT);
         assert_eq!(logs.first().map(|entry| entry.id.as_str()), Some("500"));
@@ -507,5 +937,109 @@ mod tests {
 
         assert_eq!(logs.len(), REQUEST_LOG_LIMIT);
         assert_eq!(logs.last().map(|entry| entry.id.as_str()), Some("499"));
+    }
+
+    #[test]
+    fn stats_json_payload_excludes_csv_backed_fields() {
+        let mut stats = Stats::default();
+        stats.logs.push(log(1));
+        stats.channel_models.insert(
+            "provider".to_string(),
+            ChannelModelStats {
+                name: "provider".to_string(),
+                ..ChannelModelStats::default()
+            },
+        );
+
+        let value = stats_json_payload(&stats);
+
+        assert!(value.get("logs").is_none());
+        assert!(value.get("channelModels").is_none());
+        assert_eq!(
+            value.get("requests").and_then(|item| item.as_u64()),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn load_migrates_legacy_stats_json_into_csv_then_removes_it() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("hydrallm-stats-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).await?;
+        let stats_path = dir.join("stats.json");
+        let logs_path = dir.join("request-logs.csv");
+        let model_stats_path = dir.join("model-stats.csv");
+
+        let mut legacy = Stats::default();
+        legacy.requests = 9;
+        legacy.logs = vec![log(1), log(2)];
+        legacy.channel_models.insert(
+            "provider".to_string(),
+            ChannelModelStats {
+                name: "provider".to_string(),
+                base_url: "https://legacy.example/v1".to_string(),
+                requests: 10,
+                successes: 8,
+                failures: 2,
+                models: BTreeMap::from([
+                    ("model-a".to_string(), model_stat(10, 100, 500)),
+                    ("model-b".to_string(), model_stat(3, 300, 200)),
+                ]),
+            },
+        );
+        fs::write(&stats_path, serde_json::to_vec_pretty(&legacy)?).await?;
+
+        let mut existing_log = log(1);
+        existing_log.timestamp = 10;
+        save_request_logs_csv(&logs_path, &[existing_log, log(3)]).await?;
+        save_model_stats_csv(
+            &model_stats_path,
+            &BTreeMap::from([(
+                "provider".to_string(),
+                ChannelModelStats {
+                    name: "provider".to_string(),
+                    base_url: "https://csv.example/v1".to_string(),
+                    requests: 5,
+                    successes: 4,
+                    failures: 1,
+                    models: BTreeMap::from([("model-a".to_string(), model_stat(5, 200, 200))]),
+                },
+            )]),
+        )
+        .await?;
+
+        let store = StatsStore::load(
+            stats_path.clone(),
+            logs_path.clone(),
+            model_stats_path.clone(),
+            LogSettingsConfig::default(),
+        )
+        .await?;
+        let snapshot = store.snapshot().await;
+        let migrated_logs = load_request_logs_csv(&logs_path).await?;
+        let migrated_models = load_model_stats_csv(&model_stats_path).await?;
+
+        assert!(!stats_path.exists());
+        assert_eq!(snapshot.requests, 9);
+        assert_eq!(migrated_logs.len(), 3);
+        assert_eq!(
+            migrated_logs.iter().filter(|entry| entry.id == "1").count(),
+            1
+        );
+        assert_eq!(
+            migrated_logs.first().map(|entry| entry.id.as_str()),
+            Some("1")
+        );
+
+        let provider = migrated_models.get("provider").expect("provider stats");
+        let model_a = provider.models.get("model-a").expect("model-a stats");
+        let model_b = provider.models.get("model-b").expect("model-b stats");
+        assert_eq!(provider.requests, 13);
+        assert_eq!(model_a.requests, 10);
+        assert_eq!(model_a.updated_at, 200);
+        assert_eq!(model_a.last_status, 200);
+        assert_eq!(model_b.requests, 3);
+
+        fs::remove_dir_all(&dir).await?;
+        Ok(())
     }
 }
