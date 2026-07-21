@@ -1,8 +1,8 @@
 use crate::{
     auth,
     config::{
-        endpoint_suffix, target_label, trim_slashes, Config, FailoverStrategy, ModelConfig,
-        TargetConfig,
+        endpoint_suffix, target_label, trim_slashes, ApiKeyMode, Config, FailoverStrategy,
+        ModelConfig, TargetConfig,
     },
     stats::{now_ms, FailureInfo, LogEntry, LogModelError, StatsStore},
     AppState,
@@ -16,7 +16,6 @@ use axum::{
 };
 use dashmap::DashMap;
 use futures_util::{Stream, StreamExt};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -194,6 +193,32 @@ impl ProxyRuntime {
                 thread.attempt_errors.drain(0..drain_to);
             }
         });
+    }
+
+    fn select_target_api_key(&self, target: &TargetConfig) -> String {
+        let keys = target_api_keys(target);
+        if keys.len() <= 1 {
+            return keys.first().cloned().unwrap_or_default();
+        }
+        match target.api_key_mode {
+            ApiKeyMode::RoundRobin => {
+                let cursor_key = format!(
+                    "api-key:{}:{}:{}",
+                    target.name, target.base_url, target.model_name
+                );
+                let cursor = self
+                    .round_robin
+                    .entry(cursor_key)
+                    .or_insert_with(|| AtomicU64::new(0))
+                    .fetch_add(1, AtomicOrdering::Relaxed) as usize;
+                keys[cursor % keys.len()].clone()
+            }
+            ApiKeyMode::Random => {
+                let idx = rand::random::<usize>() % keys.len();
+                keys[idx].clone()
+            }
+            ApiKeyMode::Single => keys[0].clone(),
+        }
     }
 
     pub fn retain_round_robin_models<I>(&self, model_names: I)
@@ -425,7 +450,7 @@ async fn proxy_loop(
             });
 
             let upstream = match call_target(
-                &state.client,
+                state,
                 headers,
                 body,
                 &target,
@@ -966,7 +991,7 @@ async fn enabled_targets(state: &AppState, cfg: &Config, model: &ModelConfig) ->
         .targets
         .iter()
         .filter(|target| {
-            target.enabled && !target.base_url.is_empty() && !target.api_key.is_empty()
+            target.enabled && !target.base_url.is_empty() && !target_api_keys(target).is_empty()
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1051,7 +1076,7 @@ fn rotate_targets(mut targets: Vec<TargetConfig>, start: usize) -> Vec<TargetCon
 }
 
 async fn call_target(
-    client: &Client,
+    state: &AppState,
     inbound_headers: &HeaderMap,
     body: &Value,
     target: &TargetConfig,
@@ -1061,14 +1086,16 @@ async fn call_target(
 ) -> Result<CompatibleUpstream, ProxyCallError> {
     let timeout = target_timeout(target, cfg);
     let candidates = requested_endpoint.candidates();
+    let api_key = state.proxy_runtime.select_target_api_key(target);
     for (idx, endpoint) in candidates.into_iter().enumerate() {
         let upstream_stream = is_stream && endpoint == requested_endpoint;
         let next_body =
             build_upstream_body(body, target, requested_endpoint, endpoint, upstream_stream);
-        let mut req = client
+        let mut req = state
+            .client
             .post(upstream_endpoint_url(target, endpoint))
             .header(header::CONTENT_TYPE, "application/json")
-            .bearer_auth(&target.api_key)
+            .bearer_auth(&api_key)
             .body(serde_json::to_vec(&next_body).unwrap_or_default());
         if let Some(value) = inbound_headers.get("openai-organization") {
             req = req.header("openai-organization", value);
@@ -1101,6 +1128,20 @@ fn is_endpoint_unsupported_status(status: reqwest::StatusCode) -> bool {
 
 fn upstream_endpoint_url(target: &TargetConfig, endpoint: ProxyEndpoint) -> String {
     format!("{}/{}", trim_slashes(&target.base_url), endpoint.suffix())
+}
+
+fn target_api_keys(target: &TargetConfig) -> Vec<String> {
+    let mut keys = target
+        .api_keys
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if keys.is_empty() && !target.api_key.trim().is_empty() {
+        keys.push(target.api_key.trim().to_string());
+    }
+    keys
 }
 
 fn build_upstream_body(
@@ -2511,6 +2552,7 @@ fn failed_model_error_entries(
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+    use reqwest::Client;
     use std::{path::PathBuf, sync::Arc};
     use tokio::sync::RwLock;
     use uuid::Uuid;
@@ -2707,6 +2749,19 @@ mod tests {
 
         assert!(!detector.observe(&Bytes::from_static(b"data: [DO")));
         assert!(detector.observe(&Bytes::from_static(b"NE]\n\n")));
+    }
+
+    #[test]
+    fn target_api_keys_round_robin_across_requests() {
+        let runtime = ProxyRuntime::default();
+        let mut target = target();
+        target.api_key = "sk-a".to_string();
+        target.api_keys = vec!["sk-a".to_string(), "sk-b".to_string()];
+        target.api_key_mode = ApiKeyMode::RoundRobin;
+
+        assert_eq!(runtime.select_target_api_key(&target), "sk-a");
+        assert_eq!(runtime.select_target_api_key(&target), "sk-b");
+        assert_eq!(runtime.select_target_api_key(&target), "sk-a");
     }
 
     #[tokio::test]

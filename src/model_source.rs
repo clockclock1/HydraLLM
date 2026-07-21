@@ -241,7 +241,7 @@ pub async fn check_provider_health(client: &Client, provider: &Value) -> Value {
         .unwrap_or("")
         .trim_end_matches('/')
         .to_string();
-    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or("");
+    let api_key = provider_api_key(provider);
     let timeout_ms = provider
         .get("timeoutMs")
         .and_then(Value::as_u64)
@@ -321,6 +321,8 @@ pub fn configured_providers(cfg: &Config) -> Vec<Value> {
                 "name": if provider.name.is_empty() { provider.base_url.clone() } else { provider.name.clone() },
                 "baseUrl": provider.base_url.clone(),
                 "apiKey": provider.api_key.clone(),
+                "apiKeys": provider.api_keys.clone(),
+                "apiKeyMode": provider.api_key_mode,
                 "timeoutMs": provider.timeout_ms.unwrap_or(10_000),
             })
         })
@@ -340,6 +342,8 @@ pub fn configured_providers(cfg: &Config) -> Vec<Value> {
                 "name": if target.name.is_empty() { target.base_url.clone() } else { target.name.clone() },
                 "baseUrl": target.base_url,
                 "apiKey": target.api_key,
+                "apiKeys": target.api_keys,
+                "apiKeyMode": target.api_key_mode,
                 "timeoutMs": 10_000,
             })
         }));
@@ -362,8 +366,22 @@ pub fn provider_health_key(provider: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim_end_matches('/');
-    let api_key = provider.get("apiKey").and_then(Value::as_str).unwrap_or("");
+    let api_key = provider_api_key(provider);
     format!("{}|{}|{}", name, base_url, api_key)
+}
+
+fn provider_api_key(provider: &Value) -> &str {
+    provider
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| {
+            provider
+                .get("apiKeys")
+                .and_then(Value::as_array)
+                .and_then(|keys| keys.iter().find_map(Value::as_str))
+        })
+        .unwrap_or("")
 }
 
 fn cached_provider_health(cache: &HashMap<String, Value>, provider: &Value) -> Value {

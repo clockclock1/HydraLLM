@@ -63,6 +63,8 @@ pub struct ProviderConfig {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
+    pub api_keys: Vec<String>,
+    pub api_key_mode: ApiKeyMode,
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -86,6 +88,8 @@ pub struct TargetConfig {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
+    pub api_keys: Vec<String>,
+    pub api_key_mode: ApiKeyMode,
     pub model_name: String,
     pub model_name_template: String,
     pub enabled: bool,
@@ -102,6 +106,14 @@ pub enum FailoverStrategy {
     RoundRobin,
     Weighted,
     LatencyBased,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiKeyMode {
+    Single,
+    RoundRobin,
+    Random,
 }
 
 impl Default for Config {
@@ -230,6 +242,8 @@ impl Default for TargetConfig {
             name: String::new(),
             base_url: String::new(),
             api_key: String::new(),
+            api_keys: Vec::new(),
+            api_key_mode: ApiKeyMode::Single,
             model_name: String::new(),
             model_name_template: String::new(),
             enabled: true,
@@ -248,6 +262,8 @@ impl Default for ProviderConfig {
             name: String::new(),
             base_url: String::new(),
             api_key: String::new(),
+            api_keys: Vec::new(),
+            api_key_mode: ApiKeyMode::Single,
             models: Vec::new(),
             timeout_ms: None,
         }
@@ -257,6 +273,12 @@ impl Default for ProviderConfig {
 impl Default for FailoverStrategy {
     fn default() -> Self {
         FailoverStrategy::Priority
+    }
+}
+
+impl Default for ApiKeyMode {
+    fn default() -> Self {
+        ApiKeyMode::Single
     }
 }
 
@@ -299,6 +321,11 @@ pub fn normalize_targets(targets: Vec<TargetConfig>) -> Vec<TargetConfig> {
             if target.timeout_ms == 0 {
                 target.timeout_ms = Config::default().request_timeout_ms;
             }
+            normalize_api_key_fields(
+                &mut target.api_key,
+                &mut target.api_keys,
+                &mut target.api_key_mode,
+            );
             target
         })
         .collect();
@@ -352,6 +379,11 @@ pub fn normalize_providers(providers: Vec<ProviderConfig>) -> Vec<ProviderConfig
         .into_iter()
         .map(|mut provider| {
             provider.base_url = trim_slashes(&provider.base_url);
+            normalize_api_key_fields(
+                &mut provider.api_key,
+                &mut provider.api_keys,
+                &mut provider.api_key_mode,
+            );
             provider.models = unique_strings(provider.models);
             provider
         })
@@ -366,6 +398,26 @@ pub fn unique_strings(items: Vec<String>) -> Vec<String> {
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty() && seen.insert(item.clone()))
         .collect()
+}
+
+pub fn normalize_api_key_fields(
+    api_key: &mut String,
+    api_keys: &mut Vec<String>,
+    mode: &mut ApiKeyMode,
+) {
+    *api_key = api_key.trim().to_string();
+    *api_keys = unique_strings(std::mem::take(api_keys));
+    if api_keys.is_empty() && !api_key.is_empty() {
+        api_keys.push(api_key.clone());
+    }
+    if api_key.is_empty() {
+        if let Some(first) = api_keys.first() {
+            *api_key = first.clone();
+        }
+    }
+    if api_keys.len() <= 1 {
+        *mode = ApiKeyMode::Single;
+    }
 }
 
 pub async fn ensure_config(path: &Path) -> Result<()> {
@@ -475,7 +527,7 @@ pub fn provider_name_from_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_suffix, target_label, TargetConfig};
+    use super::{endpoint_suffix, normalize_targets, target_label, ApiKeyMode, TargetConfig};
 
     #[test]
     fn response_alias_uses_openai_responses_endpoint() {
@@ -494,5 +546,18 @@ mod tests {
         };
 
         assert_eq!(target_label(&target), "openrouter|grok-4.3-high");
+    }
+
+    #[test]
+    fn normalize_targets_preserves_multi_key_mode() {
+        let targets = normalize_targets(vec![TargetConfig {
+            api_keys: vec![" sk-a ".to_string(), "sk-b".to_string(), "sk-a".to_string()],
+            api_key_mode: ApiKeyMode::RoundRobin,
+            ..TargetConfig::default()
+        }]);
+
+        assert_eq!(targets[0].api_key, "sk-a");
+        assert_eq!(targets[0].api_keys, vec!["sk-a", "sk-b"]);
+        assert_eq!(targets[0].api_key_mode, ApiKeyMode::RoundRobin);
     }
 }

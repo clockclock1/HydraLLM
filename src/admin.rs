@@ -470,7 +470,7 @@ async fn run_capability(client: &reqwest::Client, target: &Value, capability: &s
         .get("modelName")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let api_key = target.get("apiKey").and_then(Value::as_str).unwrap_or("");
+    let api_key = target_api_key(target);
     let mut payload = body;
     payload["model"] = json!(model_name);
     let res = client
@@ -509,6 +509,20 @@ async fn run_capability(client: &reqwest::Client, target: &Value, capability: &s
             "evidence": ""
         }),
     }
+}
+
+fn target_api_key(target: &Value) -> &str {
+    target
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| {
+            target
+                .get("apiKeys")
+                .and_then(Value::as_array)
+                .and_then(|keys| keys.iter().find_map(Value::as_str))
+        })
+        .unwrap_or("")
 }
 
 fn normalize_capabilities(value: Option<&Value>) -> Vec<String> {

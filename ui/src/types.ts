@@ -3,6 +3,8 @@ export interface Provider {
   name: string;
   baseUrl: string;
   apiKey: string;
+  apiKeys: string[];
+  apiKeyMode: 'single' | 'round-robin' | 'random';
   models: string[];
   status: 'online' | 'offline' | 'unknown';
   latency?: number;
@@ -110,6 +112,8 @@ export interface ModelTestTarget {
   providerName: string;
   baseUrl: string;
   apiKey: string;
+  apiKeys?: string[];
+  apiKeyMode?: Provider['apiKeyMode'];
   modelName: string;
 }
 
