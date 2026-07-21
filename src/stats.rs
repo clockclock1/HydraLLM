@@ -1,6 +1,6 @@
 use crate::config::{
-    channel_label, channel_model_label, model_circuit, normalize_log_settings, target_key, Config,
-    LogSettingsConfig, ModelConfig, TargetConfig,
+    channel_label, channel_model_display_label, model_circuit, normalize_log_settings, target_key,
+    Config, LogSettingsConfig, ModelConfig, TargetConfig,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 const REQUEST_LOG_LIMIT: usize = 500;
 const REQUEST_LOGS_CSV_HEADER: &str =
-    "id,timestamp,chainName,originalModel,failedModels,finalModel,status,latency,error\n";
+    "id,timestamp,chainName,originalModel,failedModels,failedModelErrors,finalModel,status,latency,error\n";
 const MODEL_STATS_CSV_HEADER: &str =
     "channel,baseUrl,model,requests,successes,failures,lastStatus,lastError,lastLatencyMs,updatedAt\n";
 
@@ -91,9 +91,17 @@ pub struct LogEntry {
     pub chain_name: String,
     pub original_model: String,
     pub failed_models: Vec<String>,
+    pub failed_model_errors: Vec<LogModelError>,
     pub final_model: String,
     pub status: String,
     pub latency: u64,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LogModelError {
+    pub model: String,
     pub error: String,
 }
 
@@ -137,6 +145,7 @@ impl Default for LogEntry {
             chain_name: String::new(),
             original_model: String::new(),
             failed_models: Vec::new(),
+            failed_model_errors: Vec::new(),
             final_model: String::new(),
             status: String::new(),
             latency: 0,
@@ -350,6 +359,9 @@ impl StatsStore {
         }
         let settings = self.log_settings.read().await.clone();
         entry.error = trim_string_chars(&entry.error, settings.max_error_chars);
+        for item in &mut entry.failed_model_errors {
+            item.error = trim_string_chars(&item.error, settings.max_error_chars);
+        }
         self.mutate(|stats| {
             push_request_log(&mut stats.logs, entry, &settings);
         })
@@ -426,7 +438,7 @@ impl StatsStore {
                 valid_channel_models
                     .entry(channel_label(target))
                     .or_default()
-                    .insert(channel_model_label(target));
+                    .insert(channel_model_display_label(target));
             }
         }
         self.mutate(|stats| {
@@ -469,7 +481,7 @@ fn record_channel(
     latency_ms: u64,
 ) {
     let channel_name = channel_label(target);
-    let model_name = channel_model_label(target);
+    let model_name = channel_model_display_label(target);
     let channel = stats
         .channel_models
         .entry(channel_name.clone())
@@ -619,10 +631,14 @@ fn merge_channel_models(
         channel.successes = channel.successes.max(legacy_channel.successes);
         channel.failures = channel.failures.max(legacy_channel.failures);
         for (model_name, legacy_model) in legacy_channel.models {
+            let model_name = channel_model_display_name(&channel.name, &model_name);
             match channel.models.get_mut(&model_name) {
-                Some(model) => merge_model_stat(model, legacy_model),
+                Some(model) => merge_model_stat(model, legacy_model, &channel.name),
                 None => {
-                    channel.models.insert(model_name, legacy_model);
+                    channel.models.insert(
+                        model_name.clone(),
+                        normalize_channel_model_stat_name(&channel.name, &model_name, legacy_model),
+                    );
                 }
             }
         }
@@ -642,7 +658,11 @@ fn recompute_channel_totals(channel: &mut ChannelModelStats) {
     channel.failures = channel.models.values().map(|item| item.failures).sum();
 }
 
-fn merge_model_stat(model: &mut ChannelModelItemStats, legacy: ChannelModelItemStats) {
+fn merge_model_stat(
+    model: &mut ChannelModelItemStats,
+    legacy: ChannelModelItemStats,
+    channel_name: &str,
+) {
     model.requests = model.requests.max(legacy.requests);
     model.successes = model.successes.max(legacy.successes);
     model.failures = model.failures.max(legacy.failures);
@@ -653,7 +673,33 @@ fn merge_model_stat(model: &mut ChannelModelItemStats, legacy: ChannelModelItemS
         model.updated_at = legacy.updated_at;
     }
     if model.name.is_empty() {
-        model.name = legacy.name;
+        model.name = channel_model_display_name(channel_name, &legacy.name);
+    }
+}
+
+fn normalize_channel_model_stat_name(
+    channel_name: &str,
+    model_key: &str,
+    mut model: ChannelModelItemStats,
+) -> ChannelModelItemStats {
+    model.name = channel_model_display_name(
+        channel_name,
+        if model.name.is_empty() {
+            model_key
+        } else {
+            &model.name
+        },
+    );
+    model
+}
+
+fn channel_model_display_name(channel_name: &str, model_name: &str) -> String {
+    if model_name.contains('|') {
+        model_name.to_string()
+    } else if channel_name.is_empty() {
+        model_name.to_string()
+    } else {
+        format!("{channel_name}|{model_name}")
     }
 }
 
@@ -726,18 +772,7 @@ async fn load_request_logs_csv(path: &PathBuf) -> Result<Vec<LogEntry>> {
     Ok(rows
         .into_iter()
         .skip(1)
-        .filter(|row| row.len() >= 9)
-        .map(|row| LogEntry {
-            id: row[0].clone(),
-            timestamp: row[1].parse().unwrap_or(0),
-            chain_name: row[2].clone(),
-            original_model: row[3].clone(),
-            failed_models: serde_json::from_str(&row[4]).unwrap_or_default(),
-            final_model: row[5].clone(),
-            status: row[6].clone(),
-            latency: row[7].parse().unwrap_or(0),
-            error: row[8].clone(),
-        })
+        .filter_map(csv_row_to_log_entry)
         .collect())
 }
 
@@ -748,7 +783,7 @@ async fn load_model_stats_csv(path: &PathBuf) -> Result<BTreeMap<String, Channel
     for row in rows.into_iter().skip(1).filter(|row| row.len() >= 10) {
         let channel_name = row[0].clone();
         let base_url = row[1].clone();
-        let model_name = row[2].clone();
+        let model_name = channel_model_display_name(&channel_name, &row[2]);
         let channel = channels
             .entry(channel_name.clone())
             .or_insert_with(|| ChannelModelStats {
@@ -768,7 +803,7 @@ async fn load_model_stats_csv(path: &PathBuf) -> Result<BTreeMap<String, Channel
         channel.models.insert(
             model_name.clone(),
             ChannelModelItemStats {
-                name: model_name,
+                name: model_name.clone(),
                 requests,
                 successes,
                 failures,
@@ -805,11 +840,44 @@ fn log_to_csv_fields(log: &LogEntry) -> Vec<String> {
         log.chain_name.clone(),
         log.original_model.clone(),
         serde_json::to_string(&log.failed_models).unwrap_or_else(|_| "[]".to_string()),
+        serde_json::to_string(&log.failed_model_errors).unwrap_or_else(|_| "[]".to_string()),
         log.final_model.clone(),
         log.status.clone(),
         log.latency.to_string(),
         log.error.clone(),
     ]
+}
+
+fn csv_row_to_log_entry(row: Vec<String>) -> Option<LogEntry> {
+    if row.len() >= 10 {
+        return Some(LogEntry {
+            id: row[0].clone(),
+            timestamp: row[1].parse().unwrap_or(0),
+            chain_name: row[2].clone(),
+            original_model: row[3].clone(),
+            failed_models: serde_json::from_str(&row[4]).unwrap_or_default(),
+            failed_model_errors: serde_json::from_str(&row[5]).unwrap_or_default(),
+            final_model: row[6].clone(),
+            status: row[7].clone(),
+            latency: row[8].parse().unwrap_or(0),
+            error: row[9].clone(),
+        });
+    }
+    if row.len() >= 9 {
+        return Some(LogEntry {
+            id: row[0].clone(),
+            timestamp: row[1].parse().unwrap_or(0),
+            chain_name: row[2].clone(),
+            original_model: row[3].clone(),
+            failed_models: serde_json::from_str(&row[4]).unwrap_or_default(),
+            failed_model_errors: Vec::new(),
+            final_model: row[5].clone(),
+            status: row[6].clone(),
+            latency: row[7].parse().unwrap_or(0),
+            error: row[8].clone(),
+        });
+    }
+    None
 }
 
 fn push_csv_row(out: &mut String, fields: &[String]) {
@@ -961,6 +1029,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn csv_log_rows_support_failed_model_errors_and_legacy_rows() {
+        let mut entry = log(7);
+        entry.failed_models = vec!["model-a".to_string()];
+        entry.failed_model_errors = vec![LogModelError {
+            model: "model-a".to_string(),
+            error: "HTTP 429".to_string(),
+        }];
+        entry.final_model = "model-b".to_string();
+        entry.status = "success".to_string();
+        entry.error = "model-a: HTTP 429".to_string();
+
+        let mut text = String::new();
+        push_csv_row(&mut text, &log_to_csv_fields(&entry));
+        let parsed = parse_csv(&text);
+        let parsed_entry = csv_row_to_log_entry(parsed[0].clone()).expect("new csv log");
+
+        assert_eq!(parsed_entry.failed_model_errors.len(), 1);
+        assert_eq!(parsed_entry.failed_model_errors[0].model, "model-a");
+        assert_eq!(parsed_entry.failed_model_errors[0].error, "HTTP 429");
+
+        let legacy = vec![
+            "old".to_string(),
+            "1".to_string(),
+            "chain".to_string(),
+            "public".to_string(),
+            "[\"model-a\"]".to_string(),
+            "model-b".to_string(),
+            "success".to_string(),
+            "25".to_string(),
+            "legacy error".to_string(),
+        ];
+        let legacy_entry = csv_row_to_log_entry(legacy).expect("legacy csv log");
+        assert_eq!(legacy_entry.failed_models, vec!["model-a"]);
+        assert!(legacy_entry.failed_model_errors.is_empty());
+        assert_eq!(legacy_entry.error, "legacy error");
+    }
+
+    #[test]
+    fn record_channel_uses_channel_model_display_label() {
+        let mut stats = Stats::default();
+        let target = TargetConfig {
+            name: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model_name: "grok-4.3-high".to_string(),
+            ..TargetConfig::default()
+        };
+
+        record_channel(&mut stats, &target, true, &FailureInfo::default(), 42);
+
+        let channel = stats.channel_models.get("openrouter").expect("channel");
+        let model = channel
+            .models
+            .get("openrouter|grok-4.3-high")
+            .expect("model stats");
+        assert_eq!(model.name, "openrouter|grok-4.3-high");
+        assert_eq!(model.requests, 1);
+    }
+
+    #[test]
+    fn model_stats_csv_reader_prefixes_legacy_model_names() {
+        let rows = parse_csv(
+            "channel,baseUrl,model,requests,successes,failures,lastStatus,lastError,lastLatencyMs,updatedAt\nopenrouter,https://openrouter.ai/api/v1,grok-4.3-high,2,1,1,429,rate limit,10,20\n",
+        );
+        let row = rows.into_iter().nth(1).expect("row");
+        let channel_name = row[0].clone();
+        let model_name = channel_model_display_name(&channel_name, &row[2]);
+
+        assert_eq!(model_name, "openrouter|grok-4.3-high");
+    }
+
     #[tokio::test]
     async fn load_migrates_legacy_stats_json_into_csv_then_removes_it() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("hydrallm-stats-test-{}", Uuid::new_v4()));
@@ -1031,10 +1170,17 @@ mod tests {
         );
 
         let provider = migrated_models.get("provider").expect("provider stats");
-        let model_a = provider.models.get("model-a").expect("model-a stats");
-        let model_b = provider.models.get("model-b").expect("model-b stats");
+        let model_a = provider
+            .models
+            .get("provider|model-a")
+            .expect("model-a stats");
+        let model_b = provider
+            .models
+            .get("provider|model-b")
+            .expect("model-b stats");
         assert_eq!(provider.requests, 13);
         assert_eq!(model_a.requests, 10);
+        assert_eq!(model_a.name, "provider|model-a");
         assert_eq!(model_a.updated_at, 200);
         assert_eq!(model_a.last_status, 200);
         assert_eq!(model_b.requests, 3);

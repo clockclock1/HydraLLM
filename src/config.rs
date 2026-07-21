@@ -438,13 +438,7 @@ pub fn target_key(model: &ModelConfig, target: &TargetConfig) -> String {
 }
 
 pub fn target_label(target: &TargetConfig) -> String {
-    if !target.model_name.is_empty() {
-        target.model_name.clone()
-    } else if !target.name.is_empty() {
-        target.name.clone()
-    } else {
-        target.base_url.clone()
-    }
+    channel_model_display_label(target)
 }
 
 pub fn channel_label(target: &TargetConfig) -> String {
@@ -469,6 +463,10 @@ pub fn channel_model_label(target: &TargetConfig) -> String {
     }
 }
 
+pub fn channel_model_display_label(target: &TargetConfig) -> String {
+    format!("{}|{}", channel_label(target), channel_model_label(target))
+}
+
 pub fn provider_name_from_url(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
@@ -477,7 +475,7 @@ pub fn provider_name_from_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint_suffix;
+    use super::{endpoint_suffix, target_label, TargetConfig};
 
     #[test]
     fn response_alias_uses_openai_responses_endpoint() {
@@ -485,5 +483,16 @@ mod tests {
         assert_eq!(endpoint_suffix("/response"), "responses");
         assert_eq!(endpoint_suffix("/v1/responses"), "responses");
         assert_eq!(endpoint_suffix("/responses"), "responses");
+    }
+
+    #[test]
+    fn target_label_includes_channel_and_model() {
+        let target = TargetConfig {
+            name: "openrouter".to_string(),
+            model_name: "grok-4.3-high".to_string(),
+            ..TargetConfig::default()
+        };
+
+        assert_eq!(target_label(&target), "openrouter|grok-4.3-high");
     }
 }

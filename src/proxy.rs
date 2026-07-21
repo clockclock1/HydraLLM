@@ -4,7 +4,7 @@ use crate::{
         endpoint_suffix, target_label, trim_slashes, Config, FailoverStrategy, ModelConfig,
         TargetConfig,
     },
-    stats::{now_ms, FailureInfo, LogEntry, StatsStore},
+    stats::{now_ms, FailureInfo, LogEntry, LogModelError, StatsStore},
     AppState,
 };
 use axum::{
@@ -565,6 +565,7 @@ async fn proxy_loop(
                     model,
                     requested_model,
                     &failed_models,
+                    &errors,
                     "",
                     "failed",
                     started_at,
@@ -623,6 +624,7 @@ async fn proxy_loop(
                         model,
                         requested_model,
                         &failed_models,
+                        &errors,
                         "",
                         "failed",
                         started_at,
@@ -661,6 +663,7 @@ async fn proxy_loop(
                     model,
                     requested_model,
                     &failed_models,
+                    &errors,
                     &label,
                     "success",
                     started_at,
@@ -726,6 +729,7 @@ async fn proxy_loop(
                         model,
                         requested_model,
                         &failed_models,
+                        &errors,
                         "",
                         "failed",
                         started_at,
@@ -762,6 +766,7 @@ async fn proxy_loop(
                     model,
                     requested_model,
                     &failed_models,
+                    &errors,
                     &label,
                     "success",
                     started_at,
@@ -873,6 +878,7 @@ async fn proxy_loop(
                     model,
                     requested_model,
                     &failed_models,
+                    &errors,
                     "",
                     "failed",
                     started_at,
@@ -900,6 +906,7 @@ async fn proxy_loop(
                 thread_id.to_string(),
                 requested_model.to_string(),
                 failed_models.clone(),
+                errors.clone(),
                 label,
                 started_at,
                 target_started,
@@ -929,6 +936,7 @@ async fn proxy_loop(
         model,
         requested_model,
         &failed_models,
+        &errors,
         "",
         "failed",
         started_at,
@@ -1759,6 +1767,7 @@ fn stream_response(
     thread_id: String,
     requested_model: String,
     failed_models: Vec<String>,
+    failed_errors: Vec<AttemptError>,
     label: String,
     started_at: u64,
     target_started: u64,
@@ -1772,6 +1781,7 @@ fn stream_response(
     let response_model_name = target.model_name.clone();
     let body_stream = async_stream::stream! {
         let slot_guard = slot;
+        let mut request_errors = failed_errors.clone();
         let mut stream_failure = None;
         for chunk in inspected.chunks.drain(..) {
             yield Ok::<Bytes, Infallible>(chunk);
@@ -1806,16 +1816,15 @@ fn stream_response(
                 .await;
             let mut stream_failed_models = failed_models.clone();
             stream_failed_models.push(label.clone());
-            state.proxy_runtime.append_error(
-                &thread_id,
-                AttemptError {
-                    target: label.clone(),
-                    status: Some(failure.status),
-                    message: failure.message.clone(),
-                    detail: Some(failure.body.clone()),
-                    ..AttemptError::default()
-                },
-            );
+            let err_item = AttemptError {
+                target: label.clone(),
+                status: Some(failure.status),
+                message: failure.message.clone(),
+                detail: Some(failure.body.clone()),
+                ..AttemptError::default()
+            };
+            state.proxy_runtime.append_error(&thread_id, err_item.clone());
+            request_errors.push(err_item);
             state.proxy_runtime.update_thread(&thread_id, |thread| {
                 thread.phase = "failed".to_string();
                 thread.status = format!("流式响应中检测到失败：{}", failure.message);
@@ -1827,6 +1836,7 @@ fn stream_response(
                 &model,
                 &requested_model,
                 &stream_failed_models,
+                &request_errors,
                 "",
                 "failed",
                 started_at,
@@ -1858,6 +1868,7 @@ fn stream_response(
                 &model,
                 &requested_model,
                 &failed_models,
+                &request_errors,
                 &label,
                 "success",
                 started_at,
@@ -2258,6 +2269,7 @@ async fn log_request(
     model: &ModelConfig,
     requested_model: &str,
     failed_models: &[String],
+    attempt_errors: &[AttemptError],
     final_model: &str,
     status: &str,
     started_at: u64,
@@ -2268,6 +2280,7 @@ async fn log_request(
             chain_name: model.public_name.clone(),
             original_model: requested_model.to_string(),
             failed_models: failed_models.to_vec(),
+            failed_model_errors: failed_model_error_entries(failed_models, attempt_errors, error),
             final_model: final_model.to_string(),
             status: status.to_string(),
             latency: now_ms().saturating_sub(started_at),
@@ -2275,6 +2288,38 @@ async fn log_request(
             ..LogEntry::default()
         })
         .await;
+}
+
+fn failed_model_error_entries(
+    failed_models: &[String],
+    attempt_errors: &[AttemptError],
+    fallback: &str,
+) -> Vec<LogModelError> {
+    let mut seen = HashSet::new();
+    failed_models
+        .iter()
+        .filter(|model| seen.insert((*model).clone()))
+        .map(|model| {
+            let detail = attempt_errors
+                .iter()
+                .filter(|item| item.target == *model)
+                .map(format_attempt_error)
+                .collect::<Vec<_>>()
+                .join("\n");
+            LogModelError {
+                model: model.clone(),
+                error: if detail.is_empty() {
+                    if fallback.is_empty() {
+                        "unknown error".to_string()
+                    } else {
+                        fallback.to_string()
+                    }
+                } else {
+                    detail
+                },
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2381,5 +2426,37 @@ mod tests {
         assert_eq!(converted["object"], "text_completion");
         assert_eq!(converted["choices"][0]["text"], "done");
         assert_eq!(converted["created"], 456);
+    }
+
+    #[test]
+    fn failed_model_error_entries_attach_errors_to_each_failed_model() {
+        let errors = vec![
+            AttemptError {
+                target: "model-a".to_string(),
+                attempt: Some(1),
+                status: Some(429),
+                message: "rate limited".to_string(),
+                detail: Some("{\"error\":\"quota\"}".to_string()),
+            },
+            AttemptError {
+                target: "model-b".to_string(),
+                attempt: Some(1),
+                message: "timeout".to_string(),
+                ..AttemptError::default()
+            },
+        ];
+
+        let entries = failed_model_error_entries(
+            &["model-a".to_string(), "model-b".to_string()],
+            &errors,
+            "",
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].model, "model-a");
+        assert!(entries[0].error.contains("HTTP 429"));
+        assert!(entries[0].error.contains("quota"));
+        assert_eq!(entries[1].model, "model-b");
+        assert!(entries[1].error.contains("timeout"));
     }
 }
