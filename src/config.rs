@@ -4,6 +4,8 @@ use std::{collections::HashSet, path::Path};
 use tokio::fs;
 use uuid::Uuid;
 
+pub const DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -49,6 +51,7 @@ pub struct ModelSourceConfig {
     pub url: String,
     pub api_key: String,
     pub refresh_seconds: u64,
+    pub context_window_tokens: u32,
     pub include: String,
     pub exclude: String,
     pub public_prefix: String,
@@ -74,6 +77,7 @@ pub struct ProviderConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct ModelConfig {
     pub public_name: String,
+    pub context_window_tokens: u32,
     pub enabled: bool,
     pub strategy: FailoverStrategy,
     pub circuit_breaker: CircuitBreakerConfig,
@@ -133,6 +137,7 @@ impl Default for Config {
             providers: Vec::new(),
             models: vec![ModelConfig {
                 public_name: "gpt-failover".to_string(),
+                context_window_tokens: DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS,
                 enabled: true,
                 strategy: FailoverStrategy::Priority,
                 circuit_breaker: CircuitBreakerConfig::default(),
@@ -197,6 +202,7 @@ impl Default for ModelSourceConfig {
             url: String::new(),
             api_key: String::new(),
             refresh_seconds: 300,
+            context_window_tokens: DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS,
             include: String::new(),
             exclude: String::new(),
             public_prefix: String::new(),
@@ -227,6 +233,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             public_name: String::new(),
+            context_window_tokens: DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS,
             enabled: true,
             strategy: FailoverStrategy::Priority,
             circuit_breaker: CircuitBreakerConfig::default(),
@@ -302,6 +309,9 @@ pub fn normalize_config(mut cfg: Config) -> Config {
 }
 
 pub fn normalize_model(mut model: ModelConfig) -> ModelConfig {
+    if model.context_window_tokens == 0 {
+        model.context_window_tokens = DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS;
+    }
     model.circuit_breaker = normalize_circuit(model.circuit_breaker);
     model.targets = normalize_targets(model.targets);
     model
@@ -369,6 +379,9 @@ pub fn normalize_log_settings(mut settings: LogSettingsConfig) -> LogSettingsCon
 pub fn normalize_model_source(mut source: ModelSourceConfig) -> ModelSourceConfig {
     if source.refresh_seconds == 0 {
         source.refresh_seconds = 300;
+    }
+    if source.context_window_tokens == 0 {
+        source.context_window_tokens = DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS;
     }
     source.targets = normalize_targets(source.targets);
     source
@@ -527,7 +540,11 @@ pub fn provider_name_from_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_suffix, normalize_targets, target_label, ApiKeyMode, TargetConfig};
+    use super::{
+        endpoint_suffix, normalize_model, normalize_model_source, normalize_targets, target_label,
+        ApiKeyMode, ModelConfig, ModelSourceConfig, TargetConfig,
+        DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS,
+    };
 
     #[test]
     fn response_alias_uses_openai_responses_endpoint() {
@@ -559,5 +576,32 @@ mod tests {
         assert_eq!(targets[0].api_key, "sk-a");
         assert_eq!(targets[0].api_keys, vec!["sk-a", "sk-b"]);
         assert_eq!(targets[0].api_key_mode, ApiKeyMode::RoundRobin);
+    }
+
+    #[test]
+    fn model_context_window_can_be_customized_and_legacy_zero_uses_default() {
+        let custom = normalize_model(ModelConfig {
+            context_window_tokens: 262_144,
+            ..ModelConfig::default()
+        });
+        assert_eq!(custom.context_window_tokens, 262_144);
+
+        let legacy = normalize_model(ModelConfig {
+            context_window_tokens: 0,
+            ..ModelConfig::default()
+        });
+        assert_eq!(
+            legacy.context_window_tokens,
+            DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS
+        );
+
+        let source = normalize_model_source(ModelSourceConfig {
+            context_window_tokens: 0,
+            ..ModelSourceConfig::default()
+        });
+        assert_eq!(
+            source.context_window_tokens,
+            DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS
+        );
     }
 }

@@ -13,7 +13,10 @@ use std::{
         Arc,
     },
 };
-use tokio::{fs, sync::RwLock};
+use tokio::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 use uuid::Uuid;
 
 const REQUEST_LOG_LIMIT: usize = 500;
@@ -127,6 +130,7 @@ pub struct StatsStore {
     model_stats_path: Arc<PathBuf>,
     runtime_stats_path: Arc<PathBuf>,
     log_settings: Arc<RwLock<LogSettingsConfig>>,
+    save_lock: Arc<Mutex<()>>,
     save_queued: Arc<AtomicBool>,
 }
 
@@ -225,6 +229,7 @@ impl StatsStore {
             model_stats_path: Arc::new(model_stats_path),
             runtime_stats_path: Arc::new(runtime_stats_path),
             log_settings: Arc::new(RwLock::new(log_settings)),
+            save_lock: Arc::new(Mutex::new(())),
             save_queued: Arc::new(AtomicBool::new(false)),
         };
         store.save_now().await?;
@@ -246,6 +251,7 @@ impl StatsStore {
     }
 
     pub async fn save_now(&self) -> Result<()> {
+        let _save_guard = self.save_lock.lock().await;
         let snapshot = self.snapshot().await;
         save_request_logs_csv(&self.logs_path, &snapshot.logs).await?;
         save_model_stats_csv(&self.model_stats_path, &snapshot.channel_models).await?;
@@ -1392,6 +1398,44 @@ mod tests {
             restored.targets["auto-code/provider/model/url"].last_error,
             "rate limit"
         );
+
+        fs::remove_dir_all(&dir).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_save_snapshots_state_after_prior_save_finishes() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("hydrallm-save-lock-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).await?;
+        let stats_path = dir.join("stats.json");
+        let logs_path = dir.join("request-logs.csv");
+        let model_stats_path = dir.join("model-stats.csv");
+        let runtime_stats_path = dir.join("runtime-stats.csv");
+        let store = StatsStore::load(
+            stats_path,
+            logs_path,
+            model_stats_path,
+            runtime_stats_path.clone(),
+            LogSettingsConfig::default(),
+        )
+        .await?;
+
+        let save_guard = store.save_lock.lock().await;
+        store.chain_request("auto-code").await;
+        let pending_save = tokio::spawn({
+            let store = store.clone();
+            async move { store.save_now().await }
+        });
+        tokio::task::yield_now().await;
+        store.chain_request("auto-code").await;
+        drop(save_guard);
+        pending_save.await??;
+
+        let persisted = load_runtime_stats_csv(&runtime_stats_path)
+            .await?
+            .expect("runtime stats");
+        assert_eq!(persisted.requests, 2);
+        assert_eq!(persisted.chains["auto-code"].requests, 2);
 
         fs::remove_dir_all(&dir).await?;
         Ok(())

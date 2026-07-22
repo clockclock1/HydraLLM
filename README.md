@@ -274,9 +274,9 @@ HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI.
 - Custom proxy API keys via `Authorization: Bearer ...`.
 - Admin token login and session management with `/api/login`, `/api/logout`, and `/api/session`.
 - Multiple model failover chains. Each public model can define ordered upstream targets.
-- Target fields include `name`, `baseUrl`, `apiKey`, `modelName`, `enabled`, `priority`, `weight`, `maxRetries`, `timeoutMs`, and more.
+- Each proxy model exposes its configurable `contextWindowTokens` (default 1,000,000) through `/v1/models`, and inbound requests are checked against that model's window. Target fields include `name`, `baseUrl`, `apiKey`, `modelName`, `enabled`, `priority`, `weight`, `maxRetries`, and `timeoutMs`. HydraLLM sends the original request first. Only when an upstream returns a context-length error with HTTP 422 does it lossily compact the request context and retry that same upstream until it succeeds or the payload cannot be reduced further (with a 32-round loop-safety guard); unrelated 422 responses keep their normal error behavior.
 - Failover strategies: `priority`, `round-robin`, `weighted`, `latency-based`.
-- Model-source mode: fetch models from a custom `/v1/models` URL, apply include/exclude filters, add public prefixes/suffixes, and expand `{model}` templates.
+- Model-source mode: fetch models from a custom `/v1/models` URL, apply include/exclude filters, add public prefixes/suffixes, expand `{model}` templates, and set a shared `contextWindowTokens` for the generated proxy models.
 - Streaming SSE/chunked pass-through with early upstream error probing. After bytes are written to the client, mid-stream errors are recorded but not failed over.
 - Circuit breaker with failure threshold, cooldown duration, and immediate cooldown status codes such as `429`.
 - Passive failure detection: real proxy requests trigger failover and circuit breaking; UI health checks only update observed provider status and latency.

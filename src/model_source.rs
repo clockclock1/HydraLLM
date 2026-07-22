@@ -112,6 +112,7 @@ impl ModelSourceService {
                 );
                 normalize_model(ModelConfig {
                     public_name,
+                    context_window_tokens: source.context_window_tokens,
                     enabled: true,
                     source_model_name: Some(item.id.clone()),
                     targets: source
@@ -498,6 +499,7 @@ pub fn source_cache_key(source: &ModelSourceConfig) -> String {
         source.exclude.clone(),
         source.public_prefix.clone(),
         source.public_suffix.clone(),
+        source.context_window_tokens.to_string(),
     ]
     .join("|")
 }

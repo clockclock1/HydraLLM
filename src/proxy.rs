@@ -37,6 +37,12 @@ enum ProxyCallError {
     Request(#[from] reqwest::Error),
 }
 
+const DEFAULT_OUTPUT_TOKEN_RESERVE: usize = 1024;
+// A 1M-token request shrunk by 2/3 fits into a tiny context in under 32 rounds.
+// The limit is only a loop-safety guard; compression stops earlier when it can no
+// longer reduce the request.
+const MAX_CONTEXT_COMPRESSION_ATTEMPTS: u32 = 32;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ProxyEndpoint {
     ChatCompletions,
@@ -103,6 +109,8 @@ pub struct ActiveThread {
     pub target_base_url: String,
     pub attempt: u32,
     pub max_attempts: u32,
+    pub compression_attempt: u32,
+    pub max_compression_attempts: u32,
     pub phase: String,
     pub status: String,
     pub started_at: u64,
@@ -287,12 +295,18 @@ pub async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> R
     let models = state.model_source.runtime_models(&cfg).await;
     Json(json!({
         "object": "list",
-        "data": models.into_iter().map(|model| json!({
-            "id": model.public_name,
-            "object": "model",
-            "created": now,
-            "owned_by": "failover-proxy"
-        })).collect::<Vec<_>>()
+        "data": models.into_iter().map(|model| {
+            let context_window = model.context_window_tokens;
+            json!({
+                "id": model.public_name,
+                "object": "model",
+                "created": now,
+                "owned_by": "failover-proxy",
+                "context_window": context_window,
+                "context_length": context_window,
+                "max_input_tokens": context_window
+            })
+        }).collect::<Vec<_>>()
     }))
     .into_response()
 }
@@ -335,6 +349,19 @@ async fn proxy_completion(
             None,
         );
     };
+    let requested_context_tokens =
+        estimate_json_tokens(&body).saturating_add(requested_output_token_reserve(&body));
+    let proxy_context_window = model.context_window_tokens.max(1024);
+    if requested_context_tokens > proxy_context_window as usize {
+        return send_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Request needs about {} tokens, exceeding proxy model '{}' context window of {} tokens",
+                requested_context_tokens, requested_model, proxy_context_window
+            ),
+            None,
+        );
+    }
     let targets = enabled_targets(&state, &cfg, &model).await;
     if targets.is_empty() {
         return send_error(
@@ -408,8 +435,12 @@ async fn proxy_loop(
             continue;
         }
 
-        let max_attempts = 1 + target.max_retries;
-        for attempt in 1..=max_attempts {
+        let mut target_body = body.clone();
+        let mut compression_attempts = 0;
+        let configured_max_attempts = regular_attempt_limit(&target);
+        let max_attempts = configured_max_attempts;
+        let total_attempts = max_attempts.saturating_add(MAX_CONTEXT_COMPRESSION_ATTEMPTS);
+        for attempt in 1..=total_attempts {
             if state.circuit_breakers.is_open(model, &target) {
                 let label = target_label(&target);
                 let err = AttemptError {
@@ -424,7 +455,9 @@ async fn proxy_loop(
                     thread.target_model = target.model_name.clone();
                     thread.target_base_url = target.base_url.clone();
                     thread.attempt = attempt;
-                    thread.max_attempts = max_attempts;
+                    thread.max_attempts = configured_max_attempts;
+                    thread.compression_attempt = compression_attempts;
+                    thread.max_compression_attempts = MAX_CONTEXT_COMPRESSION_ATTEMPTS;
                     thread.phase = "skipped".to_string();
                     thread.status = "目标在重试前进入熔断冷却状态，已跳过".to_string();
                     let mut next = failed_models.clone();
@@ -443,16 +476,33 @@ async fn proxy_loop(
                 thread.target_model = target.model_name.clone();
                 thread.target_base_url = target.base_url.clone();
                 thread.attempt = attempt;
-                thread.max_attempts = max_attempts;
-                thread.phase = "calling".to_string();
-                thread.status = format!("正在请求 {} (第 {}/{})", label, attempt, max_attempts);
+                thread.max_attempts = configured_max_attempts;
+                thread.compression_attempt = compression_attempts;
+                thread.max_compression_attempts = MAX_CONTEXT_COMPRESSION_ATTEMPTS;
+                thread.phase = if compression_attempts > 0 {
+                    "context-retrying"
+                } else {
+                    "calling"
+                }
+                .to_string();
+                thread.status = if compression_attempts > 0 {
+                    format!(
+                        "正在请求 {}（第 {} 次；上下文压缩重试 {}/{}）",
+                        label, attempt, compression_attempts, MAX_CONTEXT_COMPRESSION_ATTEMPTS
+                    )
+                } else {
+                    format!(
+                        "正在请求 {}（第 {}/{} 次）",
+                        label, attempt, configured_max_attempts
+                    )
+                };
                 thread.failed_models = failed_models.clone();
             });
 
             let upstream = match call_target(
                 state,
                 headers,
-                body,
+                &target_body,
                 &target,
                 cfg,
                 is_stream,
@@ -528,6 +578,34 @@ async fn proxy_loop(
 
             if !status.is_success() {
                 let text = upstream.text().await.unwrap_or_default();
+                if is_context_length_error(status.as_u16(), &text)
+                    && compression_attempts < MAX_CONTEXT_COMPRESSION_ATTEMPTS
+                {
+                    if let Some(compacted) =
+                        compact_request_context(&target_body, requested_endpoint)
+                    {
+                        compression_attempts += 1;
+                        let before_tokens = estimate_json_tokens(&target_body);
+                        let after_tokens = estimate_json_tokens(&compacted);
+                        target_body = compacted;
+                        tracing::info!(
+                            chain = %model.public_name,
+                            target = %label,
+                            compression_attempt = compression_attempts,
+                            before_tokens,
+                            after_tokens,
+                            "upstream returned HTTP 422 context-length error; compacting and retrying same target"
+                        );
+                        state.proxy_runtime.update_thread(thread_id, |thread| {
+                            thread.phase = "context-compressing".to_string();
+                            thread.status = format!(
+                                "{} 返回上下文超限，正在压缩后重试（{}/{}）",
+                                label, compression_attempts, MAX_CONTEXT_COMPRESSION_ATTEMPTS
+                            );
+                        });
+                        continue;
+                    }
+                }
                 let failure = classify_upstream_failure(status.as_u16(), &text, false, false)
                     .unwrap_or_else(|| FailureInfo {
                         status: status.as_u16(),
@@ -1122,8 +1200,168 @@ async fn call_target(
     unreachable!("endpoint candidate list is non-empty")
 }
 
+fn compact_request_context(body: &Value, requested: ProxyEndpoint) -> Option<Value> {
+    let before_tokens = estimate_json_tokens(body);
+    let input_budget = (before_tokens.saturating_mul(2) / 3).max(256);
+    let mut next = body.clone();
+    let changed = match requested {
+        ProxyEndpoint::ChatCompletions => {
+            compact_message_history(&mut next, "messages", input_budget)
+        }
+        ProxyEndpoint::Responses => {
+            if next.get("input").is_some_and(Value::is_array) {
+                compact_message_history(&mut next, "input", input_budget)
+            } else {
+                compact_text_context(&mut next, "input", input_budget)
+            }
+        }
+        ProxyEndpoint::Completions => compact_text_context(&mut next, "prompt", input_budget),
+    };
+    (changed && estimate_json_tokens(&next) < before_tokens).then_some(next)
+}
+
+fn compact_message_history(body: &mut Value, field: &str, input_budget: usize) -> bool {
+    let Some(messages) = body.get(field).and_then(Value::as_array).cloned() else {
+        return false;
+    };
+    if messages.is_empty() {
+        return false;
+    }
+    let mut per_message_chars = input_budget
+        .saturating_mul(2)
+        .saturating_div(messages.len().max(1));
+    while per_message_chars >= 24 {
+        let compacted = messages
+            .iter()
+            .map(|message| compact_message(message, per_message_chars))
+            .collect::<Vec<_>>();
+        let mut candidate = body.clone();
+        if let Some(obj) = candidate.as_object_mut() {
+            obj.insert(field.to_string(), Value::Array(compacted));
+        }
+        if estimate_json_tokens(&candidate) <= input_budget {
+            *body = candidate;
+            return true;
+        }
+        per_message_chars /= 2;
+    }
+    false
+}
+
+fn compact_message(message: &Value, max_chars: usize) -> Value {
+    let mut compacted = message.clone();
+    if let Some(obj) = compacted.as_object_mut() {
+        let content = obj.get("content").map(value_to_text).unwrap_or_default();
+        obj.insert(
+            "content".to_string(),
+            Value::String(compact_text_excerpt(&content, max_chars)),
+        );
+    }
+    compacted
+}
+
+fn compact_text_context(body: &mut Value, field: &str, input_budget: usize) -> bool {
+    let Some(original) = body.get(field).cloned() else {
+        return false;
+    };
+    let source = value_to_text(&original);
+    let mut max_chars = input_budget.saturating_mul(2);
+    while max_chars >= 24 {
+        let compacted = compact_text_excerpt(&source, max_chars);
+        let mut candidate = body.clone();
+        if let Some(obj) = candidate.as_object_mut() {
+            obj.insert(field.to_string(), Value::String(compacted));
+        }
+        if estimate_json_tokens(&candidate) <= input_budget {
+            *body = candidate;
+            return true;
+        }
+        max_chars /= 2;
+    }
+    false
+}
+
+fn compact_text_excerpt(source: &str, max_chars: usize) -> String {
+    let header = "HydraLLM compacted earlier context:\n";
+    let available = max_chars.saturating_sub(header.chars().count());
+    if source.chars().count() <= available {
+        return source.to_string();
+    }
+    let excerpt = {
+        let head = available / 2;
+        let tail = available.saturating_sub(head + 3);
+        format!(
+            "{}...{}",
+            source.chars().take(head).collect::<String>(),
+            source
+                .chars()
+                .rev()
+                .take(tail)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<String>()
+        )
+    };
+    format!("{}{}", header, excerpt)
+}
+
+#[cfg(test)]
+fn message_role(message: &Value) -> &str {
+    message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user")
+}
+
+fn requested_output_token_reserve(body: &Value) -> usize {
+    ["max_output_tokens", "max_completion_tokens", "max_tokens"]
+        .iter()
+        .find_map(|field| body.get(*field).and_then(Value::as_u64))
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(DEFAULT_OUTPUT_TOKEN_RESERVE)
+}
+
+// This intentionally overestimates instead of using a model-specific tokenizer:
+// target families may have different tokenizers, and a conservative local budget
+// is safer than sending a request that the fallback cannot accept.
+fn estimate_json_tokens(value: &Value) -> usize {
+    let text = serde_json::to_string(value).unwrap_or_default();
+    let mut ascii_chars = 0usize;
+    let mut non_ascii_chars = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            non_ascii_chars += 1;
+        }
+    }
+    ascii_chars.div_ceil(3) + non_ascii_chars.saturating_mul(2)
+}
+
 fn is_endpoint_unsupported_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 404 | 405 | 501)
+}
+
+fn is_context_length_error(status: u16, body: &str) -> bool {
+    if status != StatusCode::UNPROCESSABLE_ENTITY.as_u16() {
+        return false;
+    }
+    let message = body.to_ascii_lowercase();
+    [
+        "context length",
+        "context window",
+        "maximum context",
+        "too many tokens",
+        "token limit",
+        "input too long",
+        "prompt is too long",
+        "context_length_exceeded",
+        "上下文",
+        "输入过长",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 fn upstream_endpoint_url(target: &TargetConfig, endpoint: ProxyEndpoint) -> String {
@@ -2366,6 +2604,10 @@ fn should_try_next(status_code: u16, cfg: &Config) -> bool {
     status_code >= 400 || cfg.failover_status_codes.contains(&status_code)
 }
 
+fn regular_attempt_limit(target: &TargetConfig) -> u32 {
+    target.max_retries.saturating_add(1)
+}
+
 fn should_retry_target(
     failure: &FailureInfo,
     cfg: &Config,
@@ -2640,6 +2882,79 @@ mod tests {
         assert_eq!(converted["max_output_tokens"], 12);
         assert_eq!(converted["input"][0]["role"], "user");
         assert_eq!(converted["input"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn context_length_error_requires_422_and_context_marker() {
+        assert!(is_context_length_error(
+            422,
+            r#"{"error":{"message":"maximum context length exceeded"}}"#
+        ));
+        assert!(!is_context_length_error(
+            400,
+            "maximum context length exceeded"
+        ));
+        assert!(!is_context_length_error(422, "field validation failed"));
+    }
+
+    #[test]
+    fn regular_attempt_limit_excludes_context_compression_retries() {
+        let no_retry = TargetConfig {
+            max_retries: 0,
+            ..TargetConfig::default()
+        };
+        let two_retries = TargetConfig {
+            max_retries: 2,
+            ..TargetConfig::default()
+        };
+
+        assert_eq!(regular_attempt_limit(&no_retry), 1);
+        assert_eq!(regular_attempt_limit(&two_retries), 3);
+    }
+
+    #[test]
+    fn context_422_compacts_chat_history_before_retrying() {
+        let body = json!({
+            "model": "public-model",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "system", "content": "Always answer in Chinese."},
+                {"role": "user", "content": "old-user-".repeat(180)},
+                {"role": "assistant", "content": "old assistant response"},
+                {"role": "user", "content": "What is the final answer?"}
+            ]
+        });
+        let prepared = compact_request_context(&body, ProxyEndpoint::ChatCompletions)
+            .expect("request can be compacted after an upstream 422");
+        let messages = prepared["messages"].as_array().expect("messages array");
+
+        assert!(estimate_json_tokens(&prepared) < estimate_json_tokens(&body));
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            "What is the final answer?"
+        );
+        assert!(messages.iter().all(|message| {
+            message_role(message) != "user" || value_to_text(message).len() < 400
+        }));
+    }
+
+    #[test]
+    fn context_422_compacts_responses_input_before_retrying() {
+        let body = json!({
+            "model": "public-model",
+            "max_output_tokens": 64,
+            "instructions": "Preserve the latest answer request.",
+            "input": "older context ".repeat(300)
+        });
+        let prepared = compact_request_context(&body, ProxyEndpoint::Responses)
+            .expect("request can be compacted after an upstream 422");
+
+        assert!(estimate_json_tokens(&prepared) < estimate_json_tokens(&body));
+        assert!(prepared["input"]
+            .as_str()
+            .expect("compacted input")
+            .contains("HydraLLM compacted earlier context"));
     }
 
     #[test]

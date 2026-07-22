@@ -36,6 +36,7 @@
     "url": "",
     "apiKey": "",
     "refreshSeconds": 300,
+    "contextWindowTokens": 1000000,
     "include": "",
     "exclude": "",
     "publicPrefix": "",
@@ -60,6 +61,7 @@
   "models": [
     {
       "publicName": "gpt-failover",
+      "contextWindowTokens": 1000000,
       "enabled": true,
       "targets": [
         {
