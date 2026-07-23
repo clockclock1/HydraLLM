@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: hydrallm
-  namespace: hydrallm
+  name: failover-proxy
+  namespace: failover-proxy
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: hydrallm
+      app: failover-proxy
   template:
     metadata:
       labels:
-        app: hydrallm
+        app: failover-proxy
     spec:
       containers:
-        - name: hydrallm
-          image: ghcr.io/clockclock1/hydrallm:latest
+        - name: failover-proxy
+          image: ghcr.io/clockclock1/failover-proxy:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8787
@@ -27,11 +27,11 @@ spec:
             - name: DATA_DIR
               value: /app/data
             - name: RUST_LOG
-              value: hydrallm=info,tower_http=info
+              value: failover_proxy=info,tower_http=info
           volumeMounts:
             - name: data
               mountPath: /app/data
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: hydrallm-data
+            claimName: failover-proxy-data

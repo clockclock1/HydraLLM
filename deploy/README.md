@@ -8,7 +8,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Set `HYDRALLM_IMAGE`, `HYDRALLM_PORT`, `HYDRALLM_DATA_DIR`, `HYDRALLM_VERSION`, `HYDRALLM_NETWORK`, and `RUST_LOG` in `.env` or the environment when needed.
+Set `FAILOVER_PROXY_IMAGE`, `FAILOVER_PROXY_PORT`, `FAILOVER_PROXY_DATA_DIR`, `FAILOVER_PROXY_VERSION`, `FAILOVER_PROXY_NETWORK`, and `RUST_LOG` in `.env` or the environment when needed.
 
 ## Kubernetes
 

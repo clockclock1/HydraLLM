@@ -1306,7 +1306,7 @@ mod tests {
     #[tokio::test]
     async fn load_rebuilds_chain_totals_from_request_logs() -> Result<()> {
         let dir =
-            std::env::temp_dir().join(format!("hydrallm-stats-rebuild-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("failover-proxy-stats-rebuild-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).await?;
         let stats_path = dir.join("stats.json");
         let logs_path = dir.join("request-logs.csv");
@@ -1350,7 +1350,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_stats_csv_persists_chain_and_target_state() -> Result<()> {
         let dir =
-            std::env::temp_dir().join(format!("hydrallm-runtime-stats-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("failover-proxy-runtime-stats-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).await?;
         let path = dir.join("runtime-stats.csv");
         let mut stats = Stats::default();
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_save_snapshots_state_after_prior_save_finishes() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("hydrallm-save-lock-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("failover-proxy-save-lock-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).await?;
         let stats_path = dir.join("stats.json");
         let logs_path = dir.join("request-logs.csv");
@@ -1443,7 +1443,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_migrates_legacy_stats_json_into_csv_without_rewriting_it() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("hydrallm-stats-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("failover-proxy-stats-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).await?;
         let stats_path = dir.join("stats.json");
         let logs_path = dir.join("request-logs.csv");

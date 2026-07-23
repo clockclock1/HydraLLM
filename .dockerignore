@@ -6,8 +6,8 @@ ui/dist
 target
 dist/*
 !dist/
-!dist/hydrallm-linux-amd64
-!dist/hydrallm-linux-arm64
+!dist/failover-proxy-linux-amd64
+!dist/failover-proxy-linux-arm64
 data/config.json
 data/stats.json
 logs

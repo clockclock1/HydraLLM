@@ -10,5 +10,5 @@
 /data/runtime-stats.csv
 /deploy/compose/.env
 *.tmp
-HydraLLM-main.zip
+Failover-Proxy-main.zip
 /repo/

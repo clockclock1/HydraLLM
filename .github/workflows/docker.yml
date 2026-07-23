@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hydrallm
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/failover-proxy
 
 jobs:
   build-linux:
@@ -22,10 +22,10 @@ jobs:
         include:
           - name: linux-amd64
             target: x86_64-unknown-linux-gnu
-            artifact: hydrallm-linux-amd64
+            artifact: failover-proxy-linux-amd64
           - name: linux-arm64
             target: aarch64-unknown-linux-gnu
-            artifact: hydrallm-linux-arm64
+            artifact: failover-proxy-linux-arm64
 
     steps:
       - name: Checkout
@@ -62,7 +62,7 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
           cargo build --release --locked --target "${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/hydrallm" "dist/${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/failover-proxy" "dist/${{ matrix.artifact }}"
 
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
@@ -87,7 +87,7 @@ jobs:
 
       - name: Prepare executables
         run: |
-          chmod +x dist/hydrallm-linux-amd64 dist/hydrallm-linux-arm64
+          chmod +x dist/failover-proxy-linux-amd64 dist/failover-proxy-linux-arm64
           ls -lh dist
 
       - name: Set up QEMU

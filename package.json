@@ -1,5 +1,5 @@
 {
-  "name": "hydrallm",
+  "name": "failover-proxy",
   "version": "0.1.0",
   "private": false,
   "description": "OpenAI-compatible LLM failover proxy with a visual management UI.",

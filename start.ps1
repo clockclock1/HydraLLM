@@ -11,8 +11,8 @@ Set-Location $root
 if (-not $HostName) { $HostName = "0.0.0.0" }
 if (-not $DataDir) { $DataDir = Join-Path $root "data" }
 
-$releaseExe = Join-Path $root "target\release\hydrallm.exe"
-$debugExe = Join-Path $root "target\debug\hydrallm.exe"
+$releaseExe = Join-Path $root "target\release\failover-proxy.exe"
+$debugExe = Join-Path $root "target\debug\failover-proxy.exe"
 $inputs = @(
   (Join-Path $root "Cargo.toml"),
   (Join-Path $root "Cargo.lock"),
@@ -42,10 +42,10 @@ function Test-NeedsBuild {
 if (Test-NeedsBuild -ExePath $releaseExe -InputPaths $inputs) {
   $cargo = Get-Command cargo -ErrorAction SilentlyContinue
   if ($cargo) {
-    Write-Host "Building HydraLLM release binary..."
+    Write-Host "Building Failover Proxy release binary..."
     cargo build --release --offline
   } elseif (-not (Test-Path -LiteralPath $debugExe)) {
-    throw "Cargo was not found and no existing HydraLLM binary is available."
+    throw "Cargo was not found and no existing Failover Proxy binary is available."
   }
 }
 
@@ -53,9 +53,9 @@ $exe = if (Test-Path -LiteralPath $releaseExe) { $releaseExe } else { $debugExe 
 $env:HOST = $HostName
 $env:PORT = [string]$Port
 $env:DATA_DIR = $DataDir
-if (-not $env:RUST_LOG) { $env:RUST_LOG = "hydrallm=info,tower_http=info" }
+if (-not $env:RUST_LOG) { $env:RUST_LOG = "failover_proxy=info,tower_http=info" }
 
-Write-Host "HydraLLM will listen on http://$HostName`:$Port"
+Write-Host "Failover Proxy will listen on http://$HostName`:$Port"
 Write-Host "Admin UI: http://127.0.0.1:$Port"
 Write-Host "Data dir: $DataDir"
 

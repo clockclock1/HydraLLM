@@ -1,6 +1,6 @@
-# HydraLLM 中文 | [English](#english)
+# Failover Proxy 中文 | [English](#english)
 
-HydraLLM 是一个 OpenAI 兼容的大模型故障转移代理，内置可视化管理界面。它可以暴露自定义 API Key 和 OpenAI 风格接口，并把一个或多个公开模型名按策略路由到多个上游模型，适合低延迟代理、故障转移和容器化部署场景。
+Failover Proxy 是一个 OpenAI 兼容的大模型故障转移代理，内置可视化管理界面。它可以暴露自定义 API Key 和 OpenAI 风格接口，并把一个或多个公开模型名按策略路由到多个上游模型，适合低延迟代理、故障转移和容器化部署场景。
 
 ## 功能
 
@@ -78,7 +78,7 @@ MODEL_STATS_PATH=./data/model-stats.csv
 RUNTIME_STATS_PATH=./data/runtime-stats.csv
 BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
-RUST_LOG=hydrallm=info,tower_http=info
+RUST_LOG=failover_proxy=info,tower_http=info
 ```
 
 ## 构建前端
@@ -108,18 +108,18 @@ cargo build --release --features mimalloc
 Release profile 已启用 `opt-level=3`、LTO、单 codegen unit、符号裁剪和 `panic=abort`。构建完成后可直接分发：
 
 ```text
-target/release/hydrallm
-target/release/hydrallm.exe
+target/release/failover-proxy
+target/release/failover-proxy.exe
 ```
 
 GitHub Actions 的 `Build Executables` 工作流会生成以下二进制产物：
 
-- `hydrallm-windows-amd64.exe`
-- `hydrallm-windows-arm64.exe`
-- `hydrallm-linux-amd64`
-- `hydrallm-linux-arm64`
-- `hydrallm-macos-amd64`
-- `hydrallm-macos-arm64`
+- `failover-proxy-windows-amd64.exe`
+- `failover-proxy-windows-arm64.exe`
+- `failover-proxy-linux-amd64`
+- `failover-proxy-linux-arm64`
+- `failover-proxy-macos-amd64`
+- `failover-proxy-macos-arm64`
 
 发布 Release 时，`Docker Image` 工作流还会构建并推送多架构 Docker 镜像到 GHCR。
 
@@ -128,13 +128,13 @@ GitHub Actions 的 `Build Executables` 工作流会生成以下二进制产物�
 本地构建镜像：
 
 ```bash
-docker build -t hydrallm .
+docker build -t failover-proxy .
 ```
 
 运行：
 
 ```bash
-docker run --rm -p 8787:8787 -v hydrallm-data:/app/data hydrallm
+docker run --rm -p 8787:8787 -v failover-proxy-data:/app/data failover-proxy
 ```
 
 使用 Compose：
@@ -142,20 +142,20 @@ docker run --rm -p 8787:8787 -v hydrallm-data:/app/data hydrallm
 ```bash
 cd deploy/compose
 cp .env.example .env
-# 发布 Release 后把 HYDRALLM_VERSION 改成 v0.1.0 等版本号
-# 如需自定义宿主机端口，把 HYDRALLM_PORT 改成 18080 等端口
+# 发布 Release 后把 FAILOVER_PROXY_VERSION 改成 v0.1.0 等版本号
+# 如需自定义宿主机端口，把 FAILOVER_PROXY_PORT 改成 18080 等端口
 docker compose up -d
 ```
 
 可通过环境变量覆盖：
 
 ```bash
-HYDRALLM_IMAGE=ghcr.io/clockclock1/hydrallm
-HYDRALLM_PORT=8787
-HYDRALLM_DATA_DIR=./data
-HYDRALLM_VERSION=latest
-HYDRALLM_NETWORK=hydrallm-network
-RUST_LOG=hydrallm=info,tower_http=info
+FAILOVER_PROXY_IMAGE=ghcr.io/clockclock1/failover-proxy
+FAILOVER_PROXY_PORT=8787
+FAILOVER_PROXY_DATA_DIR=./data
+FAILOVER_PROXY_VERSION=latest
+FAILOVER_PROXY_NETWORK=failover-proxy-network
+RUST_LOG=failover_proxy=info,tower_http=info
 ```
 
 ## 编排部署
@@ -172,7 +172,7 @@ kubectl apply -f deploy/kubernetes/service.yaml
 默认镜像：
 
 ```text
-ghcr.io/clockclock1/hydrallm:latest
+ghcr.io/clockclock1/failover-proxy:latest
 ```
 
 默认端口：
@@ -253,7 +253,7 @@ oha -z 60s -c 128 -m POST http://127.0.0.1:8787/v1/chat/completions \
 建议观察：
 
 - QPS 和 p50/p95/p99 延迟：`oha`、`wrk`、`bombardier`。
-- 内存：Windows 任务管理器、`Get-Process hydrallm`、Linux `pidstat -r`。
+- 内存：Windows 任务管理器、`Get-Process failover-proxy`、Linux `pidstat -r`。
 - 连接复用：上游访问日志，短时间调试可打开 `RUST_LOG=reqwest=debug`。
 - 故障转移：让主上游返回 429、500 或超时，检查 `/api/stats` 和 `x-proxy-target`。
 - 流式转发：使用 `curl -N` 或流式压测工具，同时观察 CPU 和实时状态。
@@ -262,7 +262,7 @@ oha -z 60s -c 128 -m POST http://127.0.0.1:8787/v1/chat/completions \
 
 ## English
 
-HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI. It exposes custom API keys and OpenAI-style endpoints while routing one or many public model names through configurable upstream failover targets, making it suitable for low-latency proxying, failover, and containerized deployments.
+Failover Proxy is an OpenAI-compatible LLM failover proxy with a visual management UI. It exposes custom API keys and OpenAI-style endpoints while routing one or many public model names through configurable upstream failover targets, making it suitable for low-latency proxying, failover, and containerized deployments.
 
 ## Features
 
@@ -274,7 +274,7 @@ HydraLLM is an OpenAI-compatible LLM failover proxy with a visual management UI.
 - Custom proxy API keys via `Authorization: Bearer ...`.
 - Admin token login and session management with `/api/login`, `/api/logout`, and `/api/session`.
 - Multiple model failover chains. Each public model can define ordered upstream targets.
-- Each proxy model exposes its configurable `contextWindowTokens` (default 1,000,000) through `/v1/models`, and inbound requests are checked against that model's window. Target fields include `name`, `baseUrl`, `apiKey`, `modelName`, `enabled`, `priority`, `weight`, `maxRetries`, and `timeoutMs`. HydraLLM sends the original request first. Only when an upstream returns a context-length error with HTTP 422 does it lossily compact the request context and retry that same upstream until it succeeds or the payload cannot be reduced further (with a 32-round loop-safety guard); unrelated 422 responses keep their normal error behavior.
+- Each proxy model exposes its configurable `contextWindowTokens` (default 1,000,000) through `/v1/models`, and inbound requests are checked against that model's window. Target fields include `name`, `baseUrl`, `apiKey`, `modelName`, `enabled`, `priority`, `weight`, `maxRetries`, and `timeoutMs`. Failover Proxy sends the original request first. Only when an upstream returns a context-length error with HTTP 422 does it lossily compact the request context and retry that same upstream until it succeeds or the payload cannot be reduced further (with a 32-round loop-safety guard); unrelated 422 responses keep their normal error behavior.
 - Failover strategies: `priority`, `round-robin`, `weighted`, `latency-based`.
 - Model-source mode: fetch models from a custom `/v1/models` URL, apply include/exclude filters, add public prefixes/suffixes, expand `{model}` templates, and set a shared `contextWindowTokens` for the generated proxy models.
 - Streaming SSE/chunked pass-through with early upstream error probing. After bytes are written to the client, mid-stream errors are recorded but not failed over.
@@ -340,7 +340,7 @@ MODEL_STATS_PATH=./data/model-stats.csv
 RUNTIME_STATS_PATH=./data/runtime-stats.csv
 BODY_LIMIT_MB=50
 STREAM_FAILURE_PROBE_KB=64
-RUST_LOG=hydrallm=info,tower_http=info
+RUST_LOG=failover_proxy=info,tower_http=info
 ```
 
 ## Build UI
@@ -370,18 +370,18 @@ cargo build --release --features mimalloc
 The release profile enables `opt-level=3`, LTO, single codegen unit, symbol stripping, and `panic=abort`. After building, distribute the binary directly:
 
 ```text
-target/release/hydrallm
-target/release/hydrallm.exe
+target/release/failover-proxy
+target/release/failover-proxy.exe
 ```
 
 The GitHub Actions `Build Executables` workflow builds these artifacts:
 
-- `hydrallm-windows-amd64.exe`
-- `hydrallm-windows-arm64.exe`
-- `hydrallm-linux-amd64`
-- `hydrallm-linux-arm64`
-- `hydrallm-macos-amd64`
-- `hydrallm-macos-arm64`
+- `failover-proxy-windows-amd64.exe`
+- `failover-proxy-windows-arm64.exe`
+- `failover-proxy-linux-amd64`
+- `failover-proxy-linux-arm64`
+- `failover-proxy-macos-amd64`
+- `failover-proxy-macos-arm64`
 
 Publishing a Release also runs the `Docker Image` workflow, which builds and pushes a multi-arch Docker image to GHCR.
 
@@ -390,13 +390,13 @@ Publishing a Release also runs the `Docker Image` workflow, which builds and pus
 Build locally:
 
 ```bash
-docker build -t hydrallm .
+docker build -t failover-proxy .
 ```
 
 Run:
 
 ```bash
-docker run --rm -p 8787:8787 -v hydrallm-data:/app/data hydrallm
+docker run --rm -p 8787:8787 -v failover-proxy-data:/app/data failover-proxy
 ```
 
 Use Compose:
@@ -404,20 +404,20 @@ Use Compose:
 ```bash
 cd deploy/compose
 cp .env.example .env
-# after publishing a Release, set HYDRALLM_VERSION to v0.1.0 or another tag
-# to customize the host port, set HYDRALLM_PORT to 18080 or another port
+# after publishing a Release, set FAILOVER_PROXY_VERSION to v0.1.0 or another tag
+# to customize the host port, set FAILOVER_PROXY_PORT to 18080 or another port
 docker compose up -d
 ```
 
 Override with environment variables:
 
 ```bash
-HYDRALLM_IMAGE=ghcr.io/clockclock1/hydrallm
-HYDRALLM_PORT=8787
-HYDRALLM_DATA_DIR=./data
-HYDRALLM_VERSION=latest
-HYDRALLM_NETWORK=hydrallm-network
-RUST_LOG=hydrallm=info,tower_http=info
+FAILOVER_PROXY_IMAGE=ghcr.io/clockclock1/failover-proxy
+FAILOVER_PROXY_PORT=8787
+FAILOVER_PROXY_DATA_DIR=./data
+FAILOVER_PROXY_VERSION=latest
+FAILOVER_PROXY_NETWORK=failover-proxy-network
+RUST_LOG=failover_proxy=info,tower_http=info
 ```
 
 ## Orchestration Deployment
@@ -434,7 +434,7 @@ kubectl apply -f deploy/kubernetes/service.yaml
 Default image:
 
 ```text
-ghcr.io/clockclock1/hydrallm:latest
+ghcr.io/clockclock1/failover-proxy:latest
 ```
 
 Default port:
@@ -515,7 +515,7 @@ oha -z 60s -c 128 -m POST http://127.0.0.1:8787/v1/chat/completions \
 Track:
 
 - QPS and p50/p95/p99 latency: `oha`, `wrk`, `bombardier`.
-- Memory: Windows Task Manager, `Get-Process hydrallm`, Linux `pidstat -r`.
+- Memory: Windows Task Manager, `Get-Process failover-proxy`, Linux `pidstat -r`.
 - Connection reuse: upstream access logs and `RUST_LOG=reqwest=debug` for short runs.
 - Failover behavior: inject 429/500/timeouts from the primary and verify `/api/stats` plus `x-proxy-target`.
 - Streaming forwarding: use `curl -N` or a streaming benchmark while watching CPU and live status.

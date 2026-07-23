@@ -1282,7 +1282,7 @@ fn compact_text_context(body: &mut Value, field: &str, input_budget: usize) -> b
 }
 
 fn compact_text_excerpt(source: &str, max_chars: usize) -> String {
-    let header = "HydraLLM compacted earlier context:\n";
+    let header = "Failover Proxy compacted earlier context:\n";
     let available = max_chars.saturating_sub(header.chars().count());
     if source.chars().count() <= available {
         return source.to_string();
@@ -1755,7 +1755,7 @@ fn response_as_chat(
             "finish_reason": finish_reason,
         }],
         "usage": payload.get("usage").cloned().unwrap_or_else(|| json!({})),
-        "hydrallm_upstream": {
+        "failover_proxy_upstream": {
             "endpoint": upstream.suffix(),
             "target": target.name,
             "model": target.model_name,
@@ -1789,7 +1789,7 @@ fn response_as_responses(
         }],
         "output_text": text,
         "usage": payload.get("usage").cloned().unwrap_or_else(|| json!({})),
-        "hydrallm_upstream": {
+        "failover_proxy_upstream": {
             "endpoint": upstream.suffix(),
             "target": target.name,
             "model": target.model_name,
@@ -1817,7 +1817,7 @@ fn response_as_completions(
             "finish_reason": finish_reason
         }],
         "usage": payload.get("usage").cloned().unwrap_or_else(|| json!({})),
-        "hydrallm_upstream": {
+        "failover_proxy_upstream": {
             "endpoint": upstream.suffix(),
             "target": target.name,
             "model": target.model_name,
@@ -2810,7 +2810,7 @@ mod tests {
     }
 
     async fn test_state() -> AppState {
-        let dir = std::env::temp_dir().join(format!("hydrallm-proxy-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("failover-proxy-proxy-test-{}", Uuid::new_v4()));
         let stats_path = dir.join("stats.json");
         let logs_path = dir.join("request-logs.csv");
         let model_stats_path = dir.join("model-stats.csv");
@@ -2954,7 +2954,7 @@ mod tests {
         assert!(prepared["input"]
             .as_str()
             .expect("compacted input")
-            .contains("HydraLLM compacted earlier context"));
+            .contains("Failover Proxy compacted earlier context"));
     }
 
     #[test]

@@ -1,19 +1,19 @@
 services:
-  hydrallm:
-    image: ${HYDRALLM_IMAGE:-ghcr.io/clockclock1/hydrallm}:${HYDRALLM_VERSION:-latest}
-    container_name: hydrallm
+  failover-proxy:
+    image: ${FAILOVER_PROXY_IMAGE:-ghcr.io/clockclock1/failover-proxy}:${FAILOVER_PROXY_VERSION:-latest}
+    container_name: failover-proxy
     restart: unless-stopped
     environment:
       HOST: 0.0.0.0
       PORT: 8787
       DATA_DIR: /app/data
-      RUST_LOG: ${RUST_LOG:-hydrallm=info,tower_http=info}
+      RUST_LOG: ${RUST_LOG:-failover_proxy=info,tower_http=info}
     ports:
-      - "${HYDRALLM_PORT:-8787}:8787"
+      - "${FAILOVER_PROXY_PORT:-8787}:8787"
     volumes:
-      - ${HYDRALLM_DATA_DIR:-./data}:/app/data
+      - ${FAILOVER_PROXY_DATA_DIR:-./data}:/app/data
     networks:
-      - hydrallm-network
+      - failover-proxy-network
     healthcheck:
       test:
         - CMD
@@ -26,6 +26,6 @@ services:
       start_period: 20s
 
 networks:
-  hydrallm-network:
-    name: ${HYDRALLM_NETWORK:-hydrallm-network}
+  failover-proxy-network:
+    name: ${FAILOVER_PROXY_NETWORK:-failover-proxy-network}
     driver: bridge
