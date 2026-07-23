@@ -572,15 +572,19 @@ fn process_memory() -> Value {
     {
         proc_status_memory()
     }
-    #[cfg(all(not(windows), any(not(unix), target_os = "macos")))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_process_memory()
+    }
+    #[cfg(all(not(windows), not(unix)))]
     {
         json!({
+            "platform": "unknown",
             "pid": std::process::id(),
-            "workingSetBytes": 0u64,
-            "peakWorkingSetBytes": 0u64,
-            "privateBytes": 0u64,
-            "virtualBytes": 0u64,
-            "dataBytes": 0u64
+            "primaryMetric": "residentBytes",
+            "primaryMetricLabel": "当前驻留内存",
+            "residentBytes": 0u64,
+            "collectionError": "该操作系统尚未实现原生内存采样"
         })
     }
 }
@@ -634,20 +638,22 @@ fn windows_process_memory() -> Value {
     };
     let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) } != 0;
     json!({
+        "platform": "windows",
         "pid": std::process::id(),
+        "primaryMetric": "workingSetBytes",
+        "primaryMetricLabel": "工作集（当前驻留物理内存，含共享页）",
         "workingSetBytes": if ok { counters.WorkingSetSize as u64 } else { 0 },
         "peakWorkingSetBytes": if ok { counters.PeakWorkingSetSize as u64 } else { 0 },
-        "privateBytes": if ok { counters.PrivateUsage as u64 } else { 0 },
-        "virtualBytes": if ok { counters.PagefileUsage as u64 } else { 0 },
-        "dataBytes": 0u64
+        "privateCommitBytes": if ok { counters.PrivateUsage as u64 } else { 0 },
+        "collectionError": if ok { Value::Null } else { json!("GetProcessMemoryInfo 调用失败") }
     })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn proc_status_memory() -> Value {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let kb = |name: &str| -> u64 {
-        status
+    let read_kb = |contents: &str, name: &str| -> u64 {
+        contents
             .lines()
             .find_map(|line| {
                 let value = line.strip_prefix(name)?.trim();
@@ -659,13 +665,76 @@ fn proc_status_memory() -> Value {
             .unwrap_or(0)
             * 1024
     };
+    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").ok();
+    let rollup = rollup.as_deref().unwrap_or_default();
+    let rollup_rss = read_kb(rollup, "Rss:");
+    let rss = if rollup_rss > 0 {
+        rollup_rss
+    } else {
+        read_kb(&status, "VmRSS:")
+    };
+    let pss = read_kb(rollup, "Pss:");
+    let private_resident =
+        read_kb(rollup, "Private_Clean:").saturating_add(read_kb(rollup, "Private_Dirty:"));
+    let primary_is_pss = pss > 0;
     json!({
+        "platform": "linux",
         "pid": std::process::id(),
-        "workingSetBytes": kb("VmRSS:"),
-        "peakWorkingSetBytes": kb("VmHWM:"),
-        "privateBytes": kb("RssAnon:"),
-        "virtualBytes": kb("VmSize:"),
-        "dataBytes": kb("VmData:")
+        "primaryMetric": if primary_is_pss { "pssBytes" } else { "rssBytes" },
+        "primaryMetricLabel": if primary_is_pss {
+            "比例驻留内存（PSS，已分摊共享页）"
+        } else {
+            "驻留内存（RSS，smaps_rollup 不可用时回退）"
+        },
+        "rssBytes": rss,
+        "pssBytes": pss,
+        "privateResidentBytes": private_resident,
+        "swapBytes": read_kb(rollup, "Swap:"),
+        "peakRssBytes": read_kb(&status, "VmHWM:"),
+        "virtualBytes": read_kb(&status, "VmSize:"),
+        "dataBytes": read_kb(&status, "VmData:"),
+        "collectionError": if rollup.is_empty() {
+            json!("无法读取 /proc/self/smaps_rollup，已回退为 RSS")
+        } else {
+            Value::Null
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_memory() -> Value {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct RUsageInfoV2 {
+        _uuid_and_prefix: [u8; 16 + 6 * std::mem::size_of::<u64>()],
+        resident_size: u64,
+        phys_footprint: u64,
+        _remaining: [u64; 10],
+    }
+
+    #[link(name = "proc")]
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut c_void) -> i32;
+    }
+
+    const RUSAGE_INFO_V2: i32 = 2;
+    let mut usage: RUsageInfoV2 = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        proc_pid_rusage(
+            std::process::id() as i32,
+            RUSAGE_INFO_V2,
+            &mut usage as *mut RUsageInfoV2 as *mut c_void,
+        )
+    } == 0;
+    json!({
+        "platform": "macos",
+        "pid": std::process::id(),
+        "primaryMetric": "physicalFootprintBytes",
+        "primaryMetricLabel": "物理足迹（macOS 内存压力计入值）",
+        "physicalFootprintBytes": if ok { usage.phys_footprint } else { 0 },
+        "rssBytes": if ok { usage.resident_size } else { 0 },
+        "collectionError": if ok { Value::Null } else { json!("proc_pid_rusage 调用失败") }
     })
 }
 
@@ -677,4 +746,38 @@ fn send_error(status: StatusCode, message: &str, details: Option<Value>) -> Resp
         None => json!({ "error": { "message": message, "type": "proxy_error" } }),
     };
     no_store((status, Json(body)).into_response())
+}
+
+#[cfg(test)]
+mod memory_tests {
+    #[cfg(windows)]
+    use super::windows_process_memory;
+
+    #[cfg(target_os = "linux")]
+    use super::proc_status_memory;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_memory_does_not_label_commit_usage_as_virtual_memory() {
+        let memory = windows_process_memory();
+
+        assert!(memory["workingSetBytes"].as_u64().unwrap_or_default() > 0);
+        assert_eq!(memory["platform"], "windows");
+        assert_eq!(memory["primaryMetric"], "workingSetBytes");
+        assert!(memory.get("virtualBytes").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_memory_uses_kernel_resident_and_proportional_metrics() {
+        let memory = proc_status_memory();
+
+        assert_eq!(memory["platform"], "linux");
+        assert!(memory["rssBytes"].as_u64().unwrap_or_default() > 0);
+        assert!(matches!(
+            memory["primaryMetric"].as_str(),
+            Some("pssBytes" | "rssBytes")
+        ));
+        assert!(memory.get("workingSetBytes").is_none());
+    }
 }
