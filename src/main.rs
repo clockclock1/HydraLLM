@@ -150,6 +150,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/logout", post(admin::logout))
         .route("/api/session", get(admin::session))
         .route(
+            "/api/shares/live-status",
+            get(admin::list_live_status_shares).post(admin::create_live_status_share),
+        )
+        .route(
+            "/api/shares/live-status/revoke",
+            post(admin::revoke_live_status_share),
+        )
+        .route(
+            "/api/share/live-status/{token}",
+            get(admin::shared_live_status),
+        )
+        .route(
             "/api/config",
             get(admin::get_config).post(admin::post_config),
         )
@@ -179,6 +191,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/model-stats", get(admin::static_ui))
         .route("/endpoints", get(admin::static_ui))
         .route("/live-status", get(admin::static_ui))
+        .route(
+            "/share/live-status/{token}",
+            get(admin::live_status_share_page),
+        )
         .route("/logs", get(admin::static_ui))
         .route("/app.css", get(admin::app_css))
         .route("/app.js", get(admin::app_js))

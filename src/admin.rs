@@ -41,6 +41,96 @@ pub async fn session(State(state): State<AppState>, headers: HeaderMap) -> Respo
     admin_json(json!({ "ok": state.auth.is_admin(&headers, &cfg) }))
 }
 
+pub async fn create_live_status_share(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let mut cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+    cfg.live_status_share_token = crate::auth::AuthState::create_live_status_share_token();
+    match save_config(&state.config_path, &cfg).await {
+        Ok(normalized) => {
+            let path = format!("/share/live-status/{}", normalized.live_status_share_token);
+            *state.config.write().await = normalized;
+            admin_json(json!({ "ok": true, "path": path, "persistent": true }))
+        }
+        Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
+    }
+}
+
+pub async fn list_live_status_shares(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+    let path = (!cfg.live_status_share_token.is_empty())
+        .then(|| format!("/share/live-status/{}", cfg.live_status_share_token));
+    admin_json(json!({ "enabled": path.is_some(), "path": path, "persistent": true }))
+}
+
+pub async fn revoke_live_status_share(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let mut cfg = state.config.read().await.clone();
+    if !state.auth.is_admin(&headers, &cfg) {
+        return send_error(StatusCode::UNAUTHORIZED, "Invalid admin token", None);
+    }
+    cfg.live_status_share_token.clear();
+    match save_config(&state.config_path, &cfg).await {
+        Ok(normalized) => {
+            *state.config.write().await = normalized;
+            admin_json(json!({ "ok": true }))
+        }
+        Err(err) => send_error(StatusCode::BAD_REQUEST, &err.to_string(), None),
+    }
+}
+
+pub async fn shared_live_status(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !crate::auth::is_live_status_share_token(&token, &cfg) {
+        return send_error(
+            StatusCode::NOT_FOUND,
+            "Invalid or expired live status share link",
+            None,
+        );
+    }
+    no_store(
+        Json(json!({
+            "activeThreads": state.proxy_runtime.snapshot_threads(),
+            "memory": process_memory(),
+        }))
+        .into_response(),
+    )
+}
+
+pub async fn live_status_share_page(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    if !crate::auth::is_live_status_share_token(&token, &cfg) {
+        return send_error(
+            StatusCode::NOT_FOUND,
+            "Invalid or expired live status share link",
+            None,
+        );
+    }
+    let mut response = embedded_response("index.html");
+    response
+        .headers_mut()
+        .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    no_store(response)
+}
+
 pub async fn get_config(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cfg = state.config.read().await.clone();
     if !state.auth.is_admin(&headers, &cfg) {
@@ -338,6 +428,16 @@ pub async fn model_tests_run(
 
 pub async fn static_ui() -> Response {
     embedded_response("index.html")
+}
+
+#[allow(dead_code)]
+const LIVE_STATUS_SHARE_HTML: &str = r#"<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Failover Proxy · 实时状态</title><style>body{margin:0;background:#07111f;color:#e5edf8;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1100px;margin:0 auto;padding:32px 20px}h1{margin:0;font-size:26px}.sub{color:#9badc8;margin:8px 0 24px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.card{background:#101d31;border:1px solid #274563;border-radius:12px;padding:18px}.label{font-size:13px;color:#9badc8}.value{font-size:26px;font-weight:700;margin-top:8px}.thread{margin-top:14px}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.empty{color:#9badc8;text-align:center;padding:36px}.error{color:#ff9c9c}@media(max-width:700px){.grid{grid-template-columns:1fr}}</style></head><body><main><h1>实时状况</h1><p class="sub">只读分享链接 · 每秒自动刷新</p><section id="summary" class="grid"></section><section id="threads"></section></main><script>const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));const bytes=v=>{v=Number(v)||0;if(!v)return'-';const u=['B','KB','MB','GB','TB'];const i=Math.min(u.length-1,Math.floor(Math.log(v)/Math.log(1024)));return(v/1024**i).toFixed(i?1:0)+' '+u[i]};const endpoint='/api/share/live-status/'+encodeURIComponent(location.pathname.split('/').pop());async function refresh(){try{const res=await fetch(endpoint,{cache:'no-store',credentials:'omit'});if(!res.ok)throw Error('分享链接无效或已过期');const data=await res.json(),threads=data.activeThreads||[],memory=data.memory||{},metric=memory.primaryMetric||'workingSetBytes',usage=memory[metric];document.querySelector('#summary').innerHTML=`<div class="card"><div class="label">活动线程</div><div class="value">${threads.length}</div></div><div class="card"><div class="label">涉及链路</div><div class="value">${new Set(threads.map(x=>x.chainName)).size}</div></div><div class="card"><div class="label">内存占用</div><div class="value">${bytes(usage)}</div><div class="label">${esc(memory.primaryMetricLabel||metric)}</div></div>`;document.querySelector('#threads').innerHTML=threads.length?threads.map(t=>`<article class="card thread"><strong>${esc(t.chainName)}</strong><div class="label">${esc(t.status)}</div><p>请求模型：<span class="mono">${esc(t.requestedModel||'-')}</span></p><p>正在尝试：<span class="mono">${esc(t.targetModel||t.targetName||'-')}</span></p><p>尝试次数：${esc(t.attempt||0)} / ${esc(t.maxAttempts||0)}</p></article>`).join(''):'<div class="card empty">当前没有活动线程</div>'}catch(error){document.querySelector('#threads').innerHTML=`<div class="card error">${esc(error.message)}</div>`}}refresh();setInterval(refresh,1000);</script></body></html>"#;
+
+#[allow(dead_code)]
+fn share_live_status_html() -> &'static str {
+    r#"<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><link rel="stylesheet" href="/app.css"><title>Failover Proxy · 实时状况</title></head><body data-theme="dark" class="uiverse-shell min-h-dvh bg-slate-100"><main class="mx-auto max-w-7xl p-3 pb-8 sm:p-4 md:p-6 lg:p-8"><div class="space-y-6"><div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between"><div><div class="inline-flex w-fit items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700"><span class="h-2.5 w-2.5 rounded-full bg-current"></span>Live Threads</div><h2 class="mt-3 text-2xl font-bold text-slate-800">实时状况</h2><p class="mt-1 text-slate-500">查看代理 API 当前创建的线程、正在尝试的目标模型和进程内存占用。</p></div><div class="inline-flex w-fit items-center gap-2 self-start rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700 xl:self-auto"><span class="inline-block h-3 w-3 rounded-full border-2 border-current border-l-transparent"></span>自动刷新</div></div><section id="summary" class="grid grid-cols-1 gap-3 md:grid-cols-3"></section><section id="threads" class="live-status-thread-area space-y-3"></section></div></main><script>const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));const bytes=v=>{v=Number(v)||0;if(!v)return'-';const u=['B','KB','MB','GB','TB'];const i=Math.min(u.length-1,Math.floor(Math.log(v)/Math.log(1024)));return(v/1024**i).toFixed(i?1:0)+' '+u[i]};const endpoint='/api/share/live-status/'+encodeURIComponent(location.pathname.split('/').pop());async function refresh(){const threadsEl=document.querySelector('#threads');try{const res=await fetch(endpoint,{cache:'no-store',credentials:'omit'});if(!res.ok)throw Error('分享链接无效或已撤销');const data=await res.json(),threads=data.activeThreads||[],memory=data.memory||{},metric=memory.primaryMetric||'workingSetBytes',usage=memory[metric];document.querySelector('#summary').innerHTML=`<div class="motion-card rounded-xl border border-slate-200 bg-white p-4"><div class="flex items-center justify-between"><span class="text-sm text-slate-500">活动线程</span><span class="h-2.5 w-2.5 rounded-full bg-blue-500"></span></div><p class="mt-2 text-2xl font-bold text-slate-800">${threads.length}</p></div><div class="motion-card rounded-xl border border-slate-200 bg-white p-4"><div class="flex items-center justify-between"><span class="text-sm text-slate-500">涉及链路</span><span class="h-2.5 w-2.5 rounded-full bg-violet-500"></span></div><p class="mt-2 text-2xl font-bold text-slate-800">${new Set(threads.map(x=>x.chainName)).size}</p></div><div class="motion-card rounded-xl border border-slate-200 bg-white p-4"><div class="flex items-center justify-between"><span class="text-sm text-slate-500">内存占用</span><span class="h-2.5 w-2.5 rounded-full bg-emerald-500"></span></div><p class="mt-2 text-2xl font-bold text-slate-800">${bytes(usage)}</p><p class="mt-1 text-xs text-slate-400">${esc(memory.primaryMetricLabel||metric)}</p></div>`;threadsEl.innerHTML=threads.length?threads.map(t=>`<article class="motion-card rounded-xl border border-slate-200 bg-white p-4"><div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-700"><span class="h-2.5 w-2.5 rounded-full bg-current"></span></span><h3 class="truncate font-semibold text-slate-800">${esc(t.chainName)}</h3><span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">${esc(t.phase||'调用中')}</span></div><p class="mt-2 text-sm text-slate-600">${esc(t.status)}</p></div></div><div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3"><div class="rounded-lg bg-slate-50 p-3"><p class="text-xs text-slate-400">请求模型</p><p class="mt-1 truncate font-mono text-sm text-slate-700">${esc(t.requestedModel||'-')}</p></div><div class="rounded-lg bg-slate-50 p-3"><p class="text-xs text-slate-400">正在尝试</p><p class="mt-1 truncate font-mono text-sm text-blue-700">${esc(t.targetModel||t.targetName||'-')}</p></div><div class="rounded-lg bg-slate-50 p-3"><p class="text-xs text-slate-400">尝试次数</p><p class="mt-1 font-mono text-sm text-slate-700">${esc(t.attempt||0)} / ${esc(t.maxAttempts||0)}</p></div></div></article>`).join(''):'<div class="rounded-xl border border-dashed border-slate-200 bg-white py-16 text-center"><p class="text-sm text-slate-500">当前没有活动线程</p></div>'}catch(error){threadsEl.innerHTML=`<div class="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">${esc(error.message)}</div>`}}refresh();setInterval(refresh,1000);</script></body></html>"#
 }
 
 fn admin_json<T: Serialize>(value: T) -> Response {

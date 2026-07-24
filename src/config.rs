@@ -10,6 +10,7 @@ pub const DEFAULT_PROXY_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub admin_token: String,
+    pub live_status_share_token: String,
     pub proxy_keys: Vec<ProxyKey>,
     pub failover_status_codes: Vec<u16>,
     pub request_timeout_ms: u64,
@@ -124,6 +125,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             admin_token: "admin".to_string(),
+            live_status_share_token: String::new(),
             proxy_keys: vec![ProxyKey {
                 name: "test-key".to_string(),
                 key: "sk-local-test".to_string(),
@@ -294,6 +296,7 @@ pub fn normalize_config(mut cfg: Config) -> Config {
     if cfg.admin_token.is_empty() {
         cfg.admin_token = defaults.admin_token;
     }
+    cfg.live_status_share_token = cfg.live_status_share_token.trim().to_string();
     if cfg.failover_status_codes.is_empty() {
         cfg.failover_status_codes = defaults.failover_status_codes;
     }

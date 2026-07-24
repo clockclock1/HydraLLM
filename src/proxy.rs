@@ -2449,10 +2449,13 @@ fn embedded_error(payload: Option<&Value>, text: &str) -> Option<FailureInfo> {
                 .and_then(|m| m.as_str().parse::<u16>().ok())
         })
         .unwrap_or(0);
+    let inferred_status = infer_error_status(error, &message);
     let status = if numeric >= 400 {
         numeric
-    } else {
+    } else if regex_status >= 400 {
         regex_status
+    } else {
+        inferred_status
     };
     if !message.is_empty() || status >= 400 {
         Some(FailureInfo {
@@ -2466,6 +2469,30 @@ fn embedded_error(payload: Option<&Value>, text: &str) -> Option<FailureInfo> {
         })
     } else {
         None
+    }
+}
+
+fn infer_error_status(error: Option<&Value>, message: &str) -> u16 {
+    let code = error
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let description = format!("{} {}", code, message.to_ascii_lowercase());
+    if [
+        "rate_limit",
+        "rate limit",
+        "too many requests",
+        "resource_exhausted",
+        "insufficient_quota",
+        "quota exceeded",
+    ]
+    .iter()
+    .any(|marker| description.contains(marker))
+    {
+        StatusCode::TOO_MANY_REQUESTS.as_u16()
+    } else {
+        0
     }
 }
 
@@ -2507,7 +2534,11 @@ fn validate_assistant_output(text: &str) -> Option<FailureInfo> {
     let assistant = assistant_text(&payload);
     let tool_calls = assistant_tool_calls(&payload);
     let reasoning = assistant_reasoning_text(&payload);
-    if assistant.trim().is_empty() && tool_calls.is_empty() && reasoning.trim().is_empty() {
+    if assistant.trim().is_empty()
+        && tool_calls.is_empty()
+        && reasoning.trim().is_empty()
+        && !has_meaningful_responses_output(&payload)
+    {
         return Some(FailureInfo {
             status: 502,
             message: "Upstream returned empty assistant output".to_string(),
@@ -2515,6 +2546,51 @@ fn validate_assistant_output(text: &str) -> Option<FailureInfo> {
         });
     }
     None
+}
+
+fn has_meaningful_responses_output(payload: &Value) -> bool {
+    payload
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(is_meaningful_responses_output_item))
+}
+
+fn is_meaningful_responses_output_item(item: &Value) -> bool {
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "function_call"
+        | "computer_call"
+        | "image_generation_call"
+        | "file_search_call"
+        | "web_search_call"
+        | "code_interpreter_call" => true,
+        "message" | "reasoning" => item
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| content.iter().any(is_meaningful_content_item)),
+        _ => false,
+    }
+}
+
+fn is_meaningful_content_item(item: &Value) -> bool {
+    if item
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    if item
+        .get("refusal")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("input_image" | "output_image" | "computer_screenshot")
+    )
 }
 
 fn assistant_text(payload: &Value) -> String {
@@ -2895,6 +2971,46 @@ mod tests {
             "maximum context length exceeded"
         ));
         assert!(!is_context_length_error(422, "field validation failed"));
+    }
+
+    #[test]
+    fn embedded_rate_limit_code_is_classified_as_429() {
+        let failure = classify_upstream_failure(
+            200,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"Please retry later"}}"#,
+            true,
+            true,
+        )
+        .expect("embedded error must fail the attempt");
+
+        assert_eq!(failure.status, 429);
+        assert_eq!(failure.message, "Please retry later");
+    }
+
+    #[test]
+    fn responses_message_content_is_not_mistaken_for_empty_output() {
+        let response = r#"{
+            "object":"response",
+            "output":[{
+                "type":"message",
+                "content":[{"type":"output_text","text":"正常结果"}]
+            }]
+        }"#;
+
+        assert!(classify_upstream_failure(200, response, true, true).is_none());
+    }
+
+    #[test]
+    fn genuinely_empty_success_response_still_fails_validation() {
+        let failure = classify_upstream_failure(
+            200,
+            r#"{"object":"response","output":[{"type":"message","content":[]}]}"#,
+            true,
+            true,
+        )
+        .expect("empty response must fail validation");
+
+        assert_eq!(failure.status, 502);
     }
 
     #[test]

@@ -44,6 +44,14 @@ impl AuthState {
         }
     }
 
+    pub fn create_live_status_share_token() -> String {
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect()
+    }
+
     pub fn is_admin(&self, headers: &HeaderMap, cfg: &Config) -> bool {
         if let Some(session) = header_value(headers, "x-admin-session") {
             if let Some(item) = self.sessions.get(&session) {
@@ -98,6 +106,12 @@ impl AuthState {
             self.sessions.remove(&session);
         }
     }
+
+}
+
+pub fn is_live_status_share_token(token: &str, cfg: &Config) -> bool {
+    !cfg.live_status_share_token.is_empty()
+        && secure_eq(token.as_bytes(), cfg.live_status_share_token.as_bytes())
 }
 
 pub fn is_proxy_key(headers: &HeaderMap, cfg: &Config) -> bool {
@@ -135,4 +149,17 @@ fn secure_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn is_session_live(created_at: u64) -> bool {
     crate::stats::now_ms().saturating_sub(created_at) <= ADMIN_SESSION_TTL_MS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_status_share_token_is_high_entropy() {
+        let share = AuthState::create_live_status_share_token();
+
+        assert_eq!(share.len(), 64);
+        assert!(share.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    }
 }
